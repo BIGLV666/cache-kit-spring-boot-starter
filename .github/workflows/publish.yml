@@ -19,24 +19,18 @@ jobs:
           --health-interval 5s
           --health-timeout 3s
           --health-retries 10
-      mysql:
-        image: mysql:8.4
-        env:
-          MYSQL_ROOT_PASSWORD: root
-          MYSQL_DATABASE: cachekit_test
-        ports:
-          - 3307:3306
-        options: >-
-          --health-cmd "mysqladmin ping -h localhost -proot"
-          --health-interval 5s
-          --health-timeout 3s
-          --health-retries 20
-          --log-bin=mysql-bin
-          --binlog-format=ROW
-          --server-id=1
     steps:
       - name: Checkout
         uses: actions/checkout@v4
+
+      # binlog 测试需要 mysqld 启动参数（service options 不支持传参），用普通步骤起容器
+      - name: Start MySQL with binlog
+        run: |
+          docker run -d --name cache-kit-mysql -p 3307:3306 \
+            -e MYSQL_ROOT_PASSWORD=root -e MYSQL_DATABASE=cachekit_test \
+            mysql:8.4 --log-bin=mysql-bin --binlog-format=ROW --server-id=1
+          timeout 120 bash -c 'until docker exec cache-kit-mysql mysql -uroot -proot -e "USE cachekit_test; SELECT 1" >/dev/null 2>&1; do sleep 3; done'
+          docker exec cache-kit-mysql mysql -uroot -proot -e "SELECT @@log_bin, @@binlog_format"
 
       - name: Set up JDK 17 and import GPG key
         uses: actions/setup-java@v4
