@@ -77,6 +77,12 @@ public class CachedQueryAspect {
             return pjp.proceed();
         }
         Object id = primaryKeyResolver.resolve(method, pjp.getArgs(), meta);
+        if (id == null) {
+            // 无法证明参数是主键（如条件字段查询）：猜测会造成键空间混淆且失效链路断裂，
+            // 旁路直查 DB 并警告
+            warnUnsupported(method);
+            return pjp.proceed();
+        }
         return tieredCache.load(meta, id, ttl, cachedQuery.cacheNull(), () -> invoke(pjp));
     }
 

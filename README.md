@@ -67,7 +67,10 @@ public interface UserMapper {
 }
 ```
 
-主键推导优先级：① 参数中有实体实例（`updateById(User)`）→ ② 参数名与主键字段同名（需 `-parameters` 编译，Boot 父 POM 默认开启）→ ③ 唯一标量参数 → ④ 唯一对象参数。全部失败抛 `CacheKitException`。
+主键推导（严格模式）：① 参数中有实体实例（`updateById(User)`）→ ② 标量参数且参数名与主键字段同名
+（匹配 MyBatis `@Param` 值或 Java 参数名，需 `-parameters` 编译，Boot 父 POM 默认开启）。
+两条路都走不通（如条件字段查询 `selectByPhone(String phone)`）会打警告并**直查 DB**——
+猜测式推导会把条件值当主键回填 `表:<条件值>`，造成键空间混淆且行更新时失效链路断裂，因此被代码强制拒绝。
 
 ### 注入句柄（手动控制）
 

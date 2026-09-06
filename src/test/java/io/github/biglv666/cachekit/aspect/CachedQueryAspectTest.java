@@ -49,6 +49,10 @@ class CachedQueryAspectTest {
         @CacheInvalidate(entity = UserEntity.class)
         int updateUserName(Long userId);
 
+        /** 条件字段查询：参数是手机号不是主键 → 必须旁路直查 DB，不得回填 user:<phone> */
+        @CachedQuery
+        UserEntity selectByPhone(String phone);
+
         UserEntity unannotated(Long userId);
     }
 
@@ -66,9 +70,13 @@ class CachedQueryAspectTest {
                 getClass().getClassLoader(),
                 new Class<?>[]{UserQueryMapper.class},
                 (p, method, args) -> switch (method.getName()) {
-                    case "selectByUserId", "selectWithoutCache", "unannotated" -> {
+                    case "selectByUserId", "selectWithoutCache", "unannotated", "selectByPhone" -> {
                         dbHits.incrementAndGet();
-                        yield db.get(((Number) args[0]).longValue());
+                        yield "selectByPhone".equals(method.getName())
+                                ? db.values().stream()
+                                        .filter(u -> args[0].equals(u.getUserName()))
+                                        .findFirst().orElse(null)
+                                : db.get(((Number) args[0]).longValue());
                     }
                     case "selectByUserIds" -> {
                         dbHits.incrementAndGet();
@@ -163,6 +171,18 @@ class CachedQueryAspectTest {
         proxy.updateUserName(1L);
         assertThat(proxy.selectByUserIds(java.util.List.of(1L))).hasSize(1);
         assertThat(dbHits.get()).isEqualTo(2);
+    }
+
+    @Test
+    void fieldQueryMustBypassCacheEvenIfAnnotated() {
+        db.put(1L, new UserEntity(1L, "13800001111"));
+
+        // 条件字段查询（手机号）：参数无法证明是主键 → 每次都直查 DB，绝不回填 user:<phone>
+        proxy.selectByPhone("13800001111");
+        proxy.selectByPhone("13800001111");
+        proxy.selectByPhone("13800001111");
+
+        assertThat(dbHits.get()).as("字段查询恒回 DB").isEqualTo(3);
     }
 
     @Test

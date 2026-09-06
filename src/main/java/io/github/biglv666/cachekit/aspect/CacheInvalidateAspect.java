@@ -49,6 +49,14 @@ public class CacheInvalidateAspect {
             return;
         }
         Object id = primaryKeyResolver.resolve(method, jp.getArgs(), meta);
+        if (id == null) {
+            // 无法证明参数是主键：不猜（对应的读路径同样不会被缓存），打警告跳过
+            if (unsupportedWarned.add(method)) {
+                log.warn("@CacheInvalidate 无法证明方法参数是主键（参数名与主键字段不匹配且无实体参数），"
+                        + "本次失效被跳过: {}", method);
+            }
+            return;
+        }
         tieredCache.evict(meta, id);
     }
 
