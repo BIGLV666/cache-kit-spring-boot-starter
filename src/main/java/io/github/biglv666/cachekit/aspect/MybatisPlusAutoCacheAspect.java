@@ -39,8 +39,9 @@ public class MybatisPlusAutoCacheAspect {
     private static final String UPDATE_BY_ID = "updateById";
     private static final String DELETE_BY_ID = "deleteById";
     private static final String SELECT_BATCH_IDS = "selectBatchIds";
+    private static final String INSERT = "insert";
     private static final Set<String> AUTO_METHODS =
-            Set.of(SELECT_BY_ID, UPDATE_BY_ID, DELETE_BY_ID, SELECT_BATCH_IDS);
+            Set.of(SELECT_BY_ID, UPDATE_BY_ID, DELETE_BY_ID, SELECT_BATCH_IDS, INSERT);
 
     private final TieredEntityCache tieredCache;
     private final EntityMetadataRegistry registry;
@@ -89,6 +90,15 @@ public class MybatisPlusAutoCacheAspect {
                 Object id = idFromArg(args[0], meta);
                 if (id != null) {
                     // 事务感知失效：与 @CacheInvalidate 同一钩子（afterCommit 或立即）
+                    invalidationDelegate.evictSmart(meta, id);
+                }
+                return result;
+            }
+            case INSERT -> {
+                // 新增行会使其此前的 null 占位（"已确认不存在"）失效：新数据立即可见
+                Object result = pjp.proceed();
+                Object id = idFromArg(args[0], meta);
+                if (id != null) {
                     invalidationDelegate.evictSmart(meta, id);
                 }
                 return result;

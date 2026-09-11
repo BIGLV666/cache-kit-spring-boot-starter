@@ -23,10 +23,16 @@ public class InvalidationSubscriber implements MessageListener {
 
     private final CaffeineChannel l1;
     private final EntityMetadataRegistry registry;
+    private final String namespace;
 
     public InvalidationSubscriber(CaffeineChannel l1, EntityMetadataRegistry registry) {
+        this(l1, registry, "");
+    }
+
+    public InvalidationSubscriber(CaffeineChannel l1, EntityMetadataRegistry registry, String namespace) {
         this.l1 = l1;
         this.registry = registry;
+        this.namespace = namespace == null ? "" : namespace;
     }
 
     @Override
@@ -35,8 +41,17 @@ public class InvalidationSubscriber implements MessageListener {
         if (key == null || key.isBlank()) {
             return;
         }
-        int idx = key.lastIndexOf(':');
-        if (idx <= 0 || registry.findByPrefix(key.substring(0, idx)) == null) {
+        // 命名空间段校验（CacheKeyCustomizer 段不校验：其他实例/租户的键在本地不存在，删除是无害空操作）
+        String rest = key;
+        if (!namespace.isBlank()) {
+            if (!rest.startsWith(namespace + ":")) {
+                log.debug("收到其他命名空间的广播，忽略: {}", key);
+                return;
+            }
+            rest = rest.substring(namespace.length() + 1);
+        }
+        int idx = rest.lastIndexOf(':');
+        if (idx <= 0 || registry.findByPrefix(rest.substring(0, idx)) == null) {
             log.debug("收到无法匹配已知实体的广播，忽略: {}", key);
             return;
         }

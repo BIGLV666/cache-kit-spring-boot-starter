@@ -11,6 +11,17 @@ import java.time.Duration;
 public class CacheKitProperties {
 
     private boolean enabled = true;
+    /** 缓存键全局命名空间：多套环境/主键类型迁移时整体弃用旧键（键形如 ns:表名:主键） */
+    private String keyNamespace = "";
+
+    public String getKeyNamespace() {
+        return keyNamespace;
+    }
+
+    public void setKeyNamespace(String keyNamespace) {
+        this.keyNamespace = keyNamespace;
+    }
+
     private final L1 l1 = new L1();
     private final L2 l2 = new L2();
     private final Broadcast broadcast = new Broadcast();
@@ -151,6 +162,16 @@ public class CacheKitProperties {
     public static class L1 {
         /** 最大条目数 */
         private long maxEntries = 65536;
+        /** 权重上限（KB，按序列化后 JSON 长度计）：>0 时启用并取代 maxEntries，防大实体撑爆 L1；0 关闭 */
+        private long maxWeightKb = 0;
+
+        public long getMaxWeightKb() {
+            return maxWeightKb;
+        }
+
+        public void setMaxWeightKb(long maxWeightKb) {
+            this.maxWeightKb = maxWeightKb;
+        }
         /** L1 TTL：必须显著小于 l2.ttl，作为 pub/sub 丢消息时的脏读上界 */
         private Duration ttl = Duration.ofSeconds(30);
 

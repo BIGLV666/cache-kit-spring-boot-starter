@@ -174,7 +174,14 @@ cache-kit:
 - 写方法处于活动事务时，失效延迟到 **afterCommit** 执行（`cache-kit.tx.evict-after-commit`，默认开），事务回滚不失效
 - binlog 模式下主键列序号来自 `information_schema`，改表结构会自动重新解析（按表缓存的序号在进程生命周期内有效）
 
-## 稳健性设计
+## 已知限制与说明
+
+- **binlog 与事务时序**：MySQL 的 binlog 事件在 **COMMIT 时**才写入（事务内只进 binlog cache），监听端天然只见提交后数据，不存在"提交前触发失效"的竞态；残余的读回填竞态由双删 + TTL 兜底
+- **null 占位与 INSERT**：应用内 `mapper.insert()` 自动清除对应"已确认不存在"占位（新数据立即可见）；binlog 模式下 INSERT 行事件同样覆盖；两者皆无时，占位由 `null-ttl`（默认 30s）兜底
+- **批量缺失回源**：per-ID single-flight 保证每个缺失 ID 至多回源一次；无法保证多个**不同**批量请求合并为一条更大的 IN
+- **主键类型/表名迁移**：旧键成为孤儿由 TTL/L1 上限自然淘汰；如需立即切换，修改 `cache-kit.key-namespace` 整体弃用旧键
+
+$1
 
 - **L2 故障降级**：Redis 宕机时按未命中处理（限频告警），业务读写绝不因 L2 失败而失败，由 L1/DB 兜底
 - **序列化失败不丢数据**：实体含 Jackson 无法序列化的结构（自引用等）时，本次结果照常返回、只是不缓存

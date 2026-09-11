@@ -64,6 +64,11 @@ class MybatisPlusAutoCacheAspectTest {
                         db.put(entity.getUserId(), entity);
                         return 1;
                     }
+                    if ("insert".equals(method.getName())) {
+                        MpUserEntity entity = (MpUserEntity) args[0];
+                        db.put(entity.getUserId(), entity);
+                        return 1;
+                    }
                     return null;
                 });
 
@@ -163,6 +168,18 @@ class MybatisPlusAutoCacheAspectTest {
         assertThat(fresh.getUserName()).isEqualTo("lv2");
         // updateById 本身 + selectById 回源 = 2 次 DB 读（1 次批量 + 1 次回源）
         assertThat(dbHits.get()).isEqualTo(2);
+    }
+
+    @Test
+    void insertShouldClearNullPlaceholder() {
+        // 先让 id=2 进入"已确认不存在"占位
+        assertThat(proxy.selectBatchIds(List.of(1L, 2L))).hasSize(1);
+        assertThat(dbHits.get()).isEqualTo(1);
+
+        // 插入 id=2 → 占位必须被清掉，下次批量能读到新行
+        assertThat(proxy.insert(new MpUserEntity(2L, "newcomer"))).isEqualTo(1);
+        assertThat(proxy.selectBatchIds(List.of(1L, 2L))).hasSize(2);
+        assertThat(dbHits.get()).as("占位失效后缺失部分回源一次").isEqualTo(2);
     }
 
     @Test

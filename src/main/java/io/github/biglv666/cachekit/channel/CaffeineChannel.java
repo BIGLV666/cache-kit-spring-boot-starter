@@ -19,8 +19,24 @@ public class CaffeineChannel implements CacheChannel {
     private final Cache<String, Slot> cache;
 
     public CaffeineChannel(long maxEntries) {
-        this.cache = Caffeine.newBuilder()
-                .maximumSize(maxEntries)
+        this(maxEntries, 0);
+    }
+
+    /**
+     * @param maxEntries  最大条目数（maxWeightKb &le; 0 时生效）
+     * @param maxWeightKb 权重上限（KB，按序列化 JSON 长度计）：&gt;0 时启用基于权重的淘汰，
+     *                    防止少量大实体（含大字段）撑爆本地内存
+     */
+    public CaffeineChannel(long maxEntries, long maxWeightKb) {
+        com.github.benmanes.caffeine.cache.Caffeine<Object, Object> builder = Caffeine.newBuilder();
+        if (maxWeightKb > 0) {
+            builder.maximumWeight(maxWeightKb)
+                    .weigher((com.github.benmanes.caffeine.cache.Weigher<String, Slot>)
+                            (k, slot) -> Math.max(1, slot.json().length() / 1024));
+        } else {
+            builder.maximumSize(maxEntries);
+        }
+        this.cache = builder
                 .expireAfter(new Expiry<String, Slot>() {
                     @Override
                     public long expireAfterCreate(String key, Slot slot, long now) {

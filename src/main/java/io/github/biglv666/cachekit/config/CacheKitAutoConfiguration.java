@@ -50,7 +50,7 @@ public class CacheKitAutoConfiguration {
     @Bean
     @ConditionalOnMissingBean
     public CaffeineChannel cacheKitL1Channel(CacheKitProperties props) {
-        return new CaffeineChannel(props.getL1().getMaxEntries());
+        return new CaffeineChannel(props.getL1().getMaxEntries(), props.getL1().getMaxWeightKb());
     }
 
     @Bean(destroyMethod = "shutdown")
@@ -66,9 +66,11 @@ public class CacheKitAutoConfiguration {
                                                CaffeineChannel l1,
                                                ObjectProvider<RedisChannel> l2,
                                                ObjectProvider<InvalidationPublisher> publisher,
-                                               DoubleDeleteScheduler doubleDeleteScheduler) {
+                                               DoubleDeleteScheduler doubleDeleteScheduler,
+                                               ObjectProvider<io.github.biglv666.cachekit.core.CacheKeyCustomizer> keyCustomizers) {
         return new TieredEntityCache(props, l1, l2.getIfAvailable(),
-                publisher.getIfAvailable(NoopInvalidationPublisher::new), doubleDeleteScheduler);
+                publisher.getIfAvailable(NoopInvalidationPublisher::new), doubleDeleteScheduler,
+                props.getKeyNamespace(), keyCustomizers.stream().toList());
     }
 
     @Bean
@@ -132,7 +134,7 @@ public class CacheKitAutoConfiguration {
                                                                            CacheKitProperties props) {
             RedisMessageListenerContainer container = new RedisMessageListenerContainer();
             container.setConnectionFactory(l2Channel.template().getConnectionFactory());
-            container.addMessageListener(new InvalidationSubscriber(l1Channel, registry),
+            container.addMessageListener(new InvalidationSubscriber(l1Channel, registry, props.getKeyNamespace()),
                     new ChannelTopic(props.getBroadcast().getTopic()));
             return container;
         }

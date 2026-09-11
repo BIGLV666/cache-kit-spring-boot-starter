@@ -11,7 +11,9 @@ import org.junit.jupiter.api.Test;
 
 import java.time.Duration;
 import java.util.List;
+import java.util.Map;
 import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.CopyOnWriteArrayList;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.ExecutorService;
@@ -305,5 +307,81 @@ class TieredEntityCacheTest {
         assertThat(l1.store).doesNotContainKey("user_entity:1");
         assertThat(l1.store).doesNotContainKey("user_entity:2");
         assertThat(publisher.published).contains("user_entity:1", "user_entity:2");
+    }
+
+    @Test
+    void concurrentBatchMissesShouldCoalescePerId() throws Exception {
+        // 独立实例：干净缓存 + 独立通道
+        InMemoryChannel l1b = new InMemoryChannel();
+        InMemoryChannel l2b = new InMemoryChannel();
+        TieredEntityCache batchCache = new TieredEntityCache(new CacheKitProperties(), l1b, l2b,
+                new NoopInvalidationPublisher(), new DoubleDeleteScheduler(Duration.ofMillis(50)));
+        EntityMetadata m = new EntityMetadataRegistry().require(UserEntity.class);
+
+        // 每个 ID 的实际回源次数（跨所有批量调用）：single-flight 保证 == 1
+        Map<Long, AtomicInteger> perIdLoads = new ConcurrentHashMap<>();
+        java.util.function.Function<List<Object>, List<Object>> loader = missingIds -> {
+            for (Object id : missingIds) {
+                perIdLoads.computeIfAbsent((Long) id, k -> new AtomicInteger()).incrementAndGet();
+            }
+            sleepQuietly(50);
+            return missingIds.stream()
+                    .filter(id -> ((Long) id) == 1L)
+                    .<Object>map(id -> new UserEntity(1L, "only"))
+                    .toList();
+        };
+
+        int threads = 8;
+        ExecutorService pool = Executors.newFixedThreadPool(threads);
+        CountDownLatch start = new CountDownLatch(threads);
+        List<CompletableFuture<Object[]>> futures = new CopyOnWriteArrayList<>();
+        for (int i = 0; i < threads; i++) {
+            futures.add(CompletableFuture.supplyAsync(() -> {
+                start.countDown();
+                try {
+                    start.await(5, TimeUnit.SECONDS);
+                } catch (InterruptedException ignored) {
+                }
+                return batchCache.loadBatch(m, List.of(1L, 2L, 3L), true, null, loader);
+            }, pool));
+        }
+        start.await(5, TimeUnit.SECONDS);
+        CompletableFuture.allOf(futures.toArray(new CompletableFuture[0])).get(15, TimeUnit.SECONDS);
+        pool.shutdownNow();
+
+        // 核心保证：每个缺失 ID 至多回源一次（无论 8 个线程怎么并发到达）
+        assertThat(perIdLoads.get(1L).get()).as("ID=1 回源次数").isEqualTo(1);
+        assertThat(perIdLoads.get(2L).get()).as("ID=2 回源次数").isEqualTo(1);
+        assertThat(perIdLoads.get(3L).get()).as("ID=3 回源次数").isEqualTo(1);
+        // 所有线程拿到一致结果：只有 1 存在，2/3 为 null 占位
+        for (CompletableFuture<Object[]> f : futures) {
+            Object[] result = f.join();
+            assertThat(result[0]).isEqualTo(new UserEntity(1L, "only"));
+            assertThat(result[1]).isNull();
+            assertThat(result[2]).isNull();
+        }
+    }
+
+    @Test
+    void namespaceAndCustomizerShouldPrefixKeys() {
+        CacheKitProperties props = new CacheKitProperties();
+        props.getL2().setJitter(Duration.ZERO);
+        props.setKeyNamespace("db1");
+        InMemoryChannel l1c = new InMemoryChannel();
+        TieredEntityCache scoped = new TieredEntityCache(props, l1c, new InMemoryChannel(),
+                new NoopInvalidationPublisher(), new DoubleDeleteScheduler(Duration.ofMillis(50)),
+                "db1", List.of(() -> "tenantA"));
+
+        EntityMetadata m = new EntityMetadataRegistry().require(UserEntity.class);
+        scoped.load(m, 1L, null, true, () -> new UserEntity(1L, "lv"));
+
+        assertThat(l1c.store).containsKey("tenantA:db1:user_entity:1");
+    }
+
+    private void sleepQuietly(long ms) {
+        try {
+            Thread.sleep(ms);
+        } catch (InterruptedException ignored) {
+        }
     }
 }

@@ -73,24 +73,14 @@ public final class BatchCacheResolver {
         }
 
         if (!missing.isEmpty()) {
-            List<Object> fresh = dbBatchLoader.apply(missing);
-            Map<String, Object> freshByKey = new LinkedHashMap<>();
-            for (Object entity : fresh) {
-                Object idValue = meta.idOf(entity);
-                if (idValue == null) {
-                    continue;
-                }
-                freshByKey.put(String.valueOf(idValue), entity);
-                cache.cachePut(meta, idValue, entity, ttlOverride);
-            }
-            for (Object id : missing) {
-                String k = String.valueOf(id);
-                Object entity = freshByKey.get(k);
+            // 逐 ID single-flight 归批回源：并发批量请求重叠的缺失 ID 只回源一次
+            Object[] loaded = cache.loadBatch(meta, missing, cacheNull, ttlOverride, dbBatchLoader);
+            for (int i = 0; i < missing.size(); i++) {
+                Object entity = loaded[i];
                 if (entity != null) {
-                    resolved.put(k, entity);
-                } else if (cacheNull) {
-                    cache.cacheNull(meta, id);
+                    resolved.put(String.valueOf(missing.get(i)), entity);
                 }
+                // 不存在的 ID 已由 loadBatch 写入 null 占位（cacheNull 时）
             }
         }
 

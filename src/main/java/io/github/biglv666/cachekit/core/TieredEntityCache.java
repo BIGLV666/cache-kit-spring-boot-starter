@@ -18,6 +18,7 @@ import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CompletionException;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ThreadLocalRandom;
+import java.util.function.Function;
 import java.util.function.Supplier;
 
 /**
@@ -51,8 +52,10 @@ public class TieredEntityCache {
     private final CacheChannel l2;
     private final InvalidationPublisher publisher;
     private final DoubleDeleteScheduler doubleDeleteScheduler;
+    private final String namespace;
+    private final List<CacheKeyCustomizer> keyCustomizers;
 
-    /** single-flight：同 key 的并发回源合并为一个执行 */
+    /** single-flight：同 key 的并发回源合并为一个执行（单条与批量共用） */
     private final ConcurrentHashMap<String, CompletableFuture<Object>> inflight = new ConcurrentHashMap<>();
 
     public TieredEntityCache(CacheKitProperties props,
@@ -60,11 +63,41 @@ public class TieredEntityCache {
                              CacheChannel l2,
                              InvalidationPublisher publisher,
                              DoubleDeleteScheduler doubleDeleteScheduler) {
+        this(props, l1, l2, publisher, doubleDeleteScheduler, "", List.of());
+    }
+
+    public TieredEntityCache(CacheKitProperties props,
+                             CacheChannel l1,
+                             CacheChannel l2,
+                             InvalidationPublisher publisher,
+                             DoubleDeleteScheduler doubleDeleteScheduler,
+                             String namespace,
+                             List<CacheKeyCustomizer> keyCustomizers) {
         this.props = props;
         this.l1 = l1;
         this.l2 = l2;
         this.publisher = publisher;
         this.doubleDeleteScheduler = doubleDeleteScheduler;
+        this.namespace = namespace == null ? "" : namespace;
+        this.keyCustomizers = keyCustomizers == null ? List.of() : keyCustomizers;
+    }
+
+    /**
+     * 缓存键组装：自定义段（多租户/多数据源，CacheKeyCustomizer）+ 命名空间（cache-kit.key-namespace）
+     * + 实体前缀 + 主键。迁移主键类型/表名时改 namespace 即可整体弃用旧键。
+     */
+    private String key(EntityMetadata meta, Object id) {
+        StringBuilder sb = new StringBuilder();
+        for (CacheKeyCustomizer customizer : keyCustomizers) {
+            String segment = customizer.segment();
+            if (segment != null && !segment.isBlank()) {
+                sb.append(segment).append(':');
+            }
+        }
+        if (!namespace.isBlank()) {
+            sb.append(namespace).append(':');
+        }
+        return sb.append(meta.prefix()).append(':').append(id).toString();
     }
 
     /**
@@ -82,7 +115,7 @@ public class TieredEntityCache {
         if (BypassContext.isActive()) {
             return loader.get();
         }
-        String key = meta.keyOf(id);
+        String key = key(meta, id);
 
         CacheEntry c1 = l1.get(key);
         Object v = c1.hit() ? decode(key, c1.json(), meta) : DECODE_FAILED;
@@ -160,6 +193,93 @@ public class TieredEntityCache {
     }
 
     /**
+     * 批量 read-through：逐 ID single-flight（与单条 load 共用同一张 inflight 表），
+     * 本线程"赢得"的缺失键自动归成一批、一次 {@code dbBatchLoader}（IN 语句）回源；
+     * 并发批量请求中重叠的缺失 ID 直接 join 已有 future，不会重复回源。
+     *
+     * <p>保证：每个缺失 ID 至多回源一次（无论多少并发请求、单条还是批量到达）。</p>
+     *
+     * @param ids          请求的主键集合（调用方已做过三态窥探，全部应为未命中）
+     * @param cacheNull    不存在的 ID 是否写 null 占位
+     * @param dbBatchLoader 批量加载逻辑，只查传入的缺失 ID，返回存在的实体
+     * @return 与入参 ids 一一对应的结果数组（不存在为 null）
+     */
+    public Object[] loadBatch(EntityMetadata meta, List<Object> ids, boolean cacheNull,
+                              Duration ttlOverride, Function<List<Object>, List<Object>> dbBatchLoader) {
+        int n = ids.size();
+        @SuppressWarnings("unchecked")
+        CompletableFuture<Object>[] slots = new CompletableFuture[n];
+        List<Integer> ownedIdx = new ArrayList<>();
+        List<Object> ownedIds = new ArrayList<>();
+        for (int i = 0; i < n; i++) {
+            CompletableFuture<Object> created = new CompletableFuture<>();
+            CompletableFuture<Object> prev = inflight.putIfAbsent(key(meta, ids.get(i)), created);
+            if (prev == null) {
+                slots[i] = created;
+                ownedIdx.add(i);
+                ownedIds.add(ids.get(i));
+            } else {
+                slots[i] = prev;
+            }
+        }
+
+        if (!ownedIds.isEmpty()) {
+            try {
+                List<Object> fresh = dbBatchLoader.apply(ownedIds);
+                Map<String, Object> freshByKey = new LinkedHashMap<>();
+                for (Object entity : fresh) {
+                    Object idValue = meta.idOf(entity);
+                    if (idValue != null) {
+                        freshByKey.put(String.valueOf(idValue), entity);
+                    }
+                }
+                for (int i = 0; i < ownedIds.size(); i++) {
+                    Object id = ownedIds.get(i);
+                    Object entity = freshByKey.get(String.valueOf(id));
+                    if (entity != null) {
+                        String json = null;
+                        try {
+                            json = JsonCodec.write(entity);
+                        } catch (Exception e) {
+                            log.warn("缓存值序列化失败，本次结果不缓存: {}", meta.entityType().getName(), e);
+                        }
+                        if (json != null) {
+                            putBoth(key(meta, id), json, effectiveTtl(meta, ttlOverride), props.getL1().getTtl());
+                        }
+                        slots[ownedIdx.get(i)].complete(entity);
+                    } else {
+                        if (cacheNull) {
+                            putBoth(key(meta, id), JsonCodec.NULL_SENTINEL,
+                                    props.getL2().getNullTtl(), props.getL2().getNullTtl());
+                        }
+                        slots[ownedIdx.get(i)].complete(null);
+                    }
+                }
+            } catch (Throwable t) {
+                for (Integer idx : ownedIdx) {
+                    slots[idx].completeExceptionally(t);
+                }
+            } finally {
+                // 必须清理：残留的已完成 future 会让后续读永远 join 到旧值（失效失效）
+                for (int i = 0; i < ownedIds.size(); i++) {
+                    inflight.remove(key(meta, ownedIds.get(i)), slots[ownedIdx.get(i)]);
+                }
+            }
+        }
+
+        Object[] out = new Object[n];
+        for (int i = 0; i < n; i++) {
+            try {
+                out[i] = slots[i].join();
+            } catch (CompletionException e) {
+                Throwable cause = e.getCause() != null ? e.getCause() : e;
+                throw cause instanceof RuntimeException re ? re : new CacheKitException(cause);
+            }
+        }
+        return out;
+    }
+
+    /**
      * 批量失效：逐键立即删除 + 广播；延迟双删整个批次只调度一次任务（合并，防行事件风暴）。
      *
      * @param withDoubleDelete  false 时跳过延迟双删（用于调用方自行合并非逐行双删的场景）
@@ -168,7 +288,7 @@ public class TieredEntityCache {
         List<String> keys = new ArrayList<>();
         for (Object id : ids) {
             if (id != null) {
-                keys.add(meta.keyOf(id));
+                keys.add(key(meta, id));
             }
         }
         for (String key : keys) {
@@ -183,7 +303,7 @@ public class TieredEntityCache {
      * 不触发回源的缓存窥探：供批量查询做"命中/已缓存空/未命中"三态拆分。
      */
     public CachePeek peek(EntityMetadata meta, Object id) {
-        String key = meta.keyOf(id);
+        String key = key(meta, id);
         CacheEntry c1 = l1.get(key);
         if (c1.hit()) {
             return toPeek(decode(key, c1.json(), meta));
@@ -267,7 +387,7 @@ public class TieredEntityCache {
             log.warn("缓存值序列化失败，跳过缓存: {}", meta.entityType().getName(), e);
             return;
         }
-        putBoth(meta.keyOf(id), json, effectiveTtl(meta, ttlOverride), props.getL1().getTtl());
+        putBoth(key(meta, id), json, effectiveTtl(meta, ttlOverride), props.getL1().getTtl());
     }
 
     /**
@@ -279,7 +399,7 @@ public class TieredEntityCache {
         List<String> missKeys = new ArrayList<>();
         List<Integer> missIdx = new ArrayList<>();
         for (Object id : ids) {
-            String key = meta.keyOf(id);
+            String key = key(meta, id);
             CacheEntry c1 = l1.get(key);
             CachePeek p = c1.hit() ? toPeek(decode(key, c1.json(), meta))
                     : new CachePeek(CachePeek.State.MISS, null);
@@ -318,7 +438,7 @@ public class TieredEntityCache {
 
     /** 批量流程写回"已缓存空"占位（防穿透） */
     public void cacheNull(EntityMetadata meta, Object id) {
-        putBoth(meta.keyOf(id), JsonCodec.NULL_SENTINEL, props.getL2().getNullTtl(), props.getL2().getNullTtl());
+        putBoth(key(meta, id), JsonCodec.NULL_SENTINEL, props.getL2().getNullTtl(), props.getL2().getNullTtl());
     }
 
     /** 单次完整删除：本地 L1 + L2 + 广播 */
