@@ -39,19 +39,27 @@ class CaffeineChannelTest {
     }
 
     @Test
-    void maxWeightShouldEvictLargeEntries() {
+    void maxWeightShouldEvictLargeEntries() throws Exception {
         // 1KB 权重上限：每条 2KB 的值权重为 2，存不下 50 条
         CaffeineChannel weighted = new CaffeineChannel(1000, 1);
         for (int i = 0; i < 50; i++) {
             weighted.put("big" + i, "x".repeat(2048), Duration.ofMinutes(5));
         }
-        int hits = 0;
-        for (int i = 0; i < 50; i++) {
-            if (weighted.get("big" + i).hit()) {
-                hits++;
+        // Caffeine 淘汰是惰性的（读写触发维护），轮询等待收敛到上限以内
+        int hits = 50;
+        for (int round = 0; round < 40; round++) {
+            hits = 0;
+            for (int i = 0; i < 50; i++) {
+                if (weighted.get("big" + i).hit()) {
+                    hits++;
+                }
             }
+            if (hits <= 5) {
+                break;
+            }
+            Thread.sleep(50);
         }
-        assertThat(hits).as("权重上限下大条目被淘汰，驻留数远小于 50").isLessThan(10);
+        assertThat(hits).as("权重上限下大条目最终被淘汰").isLessThanOrEqualTo(5);
 
         // 对比：条目数上限模式下 50 条小值全部驻留
         CaffeineChannel entries = new CaffeineChannel(1000);

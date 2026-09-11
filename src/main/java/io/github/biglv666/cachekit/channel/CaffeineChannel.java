@@ -30,9 +30,10 @@ public class CaffeineChannel implements CacheChannel {
     public CaffeineChannel(long maxEntries, long maxWeightKb) {
         com.github.benmanes.caffeine.cache.Caffeine<Object, Object> builder = Caffeine.newBuilder();
         if (maxWeightKb > 0) {
+            // newBuilder() 固定返回 Caffeine<Object,Object>（3.2.x 非泛型），键实为 String、值为 Slot
             builder.maximumWeight(maxWeightKb)
-                    .weigher((com.github.benmanes.caffeine.cache.Weigher<String, Slot>)
-                            (k, slot) -> Math.max(1, slot.json().length() / 1024));
+                    .weigher((com.github.benmanes.caffeine.cache.Weigher<Object, Object>)
+                            (key, value) -> Math.max(1, ((Slot) value).json().length() / 1024));
         } else {
             builder.maximumSize(maxEntries);
         }

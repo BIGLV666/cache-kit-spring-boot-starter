@@ -74,6 +74,12 @@
             <version>${mybatis-plus.version}</version>
             <optional>true</optional>
         </dependency>
+        <!-- 观测：micrometer-core（actuator 自带）在类路径时自动注册 cache-kit.* 指标 -->
+        <dependency>
+            <groupId>io.micrometer</groupId>
+            <artifactId>micrometer-core</artifactId>
+            <optional>true</optional>
+        </dependency>
         <!-- binlog 直连失效：随包传递（零传递依赖），cache-kit.binlog.enabled=true 时启用，
              直连 MySQL replica 协议，无需部署 Canal Server -->
         <dependency>

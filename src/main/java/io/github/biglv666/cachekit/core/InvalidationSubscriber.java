@@ -24,6 +24,8 @@ public class InvalidationSubscriber implements MessageListener {
     private final CaffeineChannel l1;
     private final EntityMetadataRegistry registry;
     private final String namespace;
+    private volatile CacheMetricsListener metrics = new CacheMetricsListener() {
+    };
 
     public InvalidationSubscriber(CaffeineChannel l1, EntityMetadataRegistry registry) {
         this(l1, registry, "");
@@ -33,6 +35,12 @@ public class InvalidationSubscriber implements MessageListener {
         this.l1 = l1;
         this.registry = registry;
         this.namespace = namespace == null ? "" : namespace;
+    }
+
+    /** 挂载指标监听器 */
+    public void setMetricsListener(CacheMetricsListener metrics) {
+        this.metrics = metrics == null ? new CacheMetricsListener() {
+        } : metrics;
     }
 
     @Override
@@ -52,9 +60,11 @@ public class InvalidationSubscriber implements MessageListener {
         }
         int idx = rest.lastIndexOf(':');
         if (idx <= 0 || registry.findByPrefix(rest.substring(0, idx)) == null) {
+            metrics.broadcastReceived(false);
             log.debug("收到无法匹配已知实体的广播，忽略: {}", key);
             return;
         }
+        metrics.broadcastReceived(true);
         l1.evict(key);
         log.debug("收到失效广播，已清除本地 L1: {}", key);
     }

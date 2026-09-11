@@ -18,6 +18,8 @@ import io.github.biglv666.cachekit.core.TieredEntityCache;
 import io.github.biglv666.cachekit.exception.CacheKitException;
 import io.github.biglv666.cachekit.handle.CacheHandleBeanPostProcessor;
 import io.github.biglv666.cachekit.metadata.EntityMetadataRegistry;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 import org.springframework.beans.factory.BeanFactory;
 import org.springframework.beans.factory.ObjectProvider;
 import org.springframework.boot.autoconfigure.AutoConfiguration;
@@ -41,9 +43,25 @@ import org.springframework.data.redis.listener.RedisMessageListenerContainer;
 @EnableConfigurationProperties(CacheKitProperties.class)
 public class CacheKitAutoConfiguration {
 
+    private static final Logger log = LoggerFactory.getLogger(CacheKitAutoConfiguration.class);
+
+
     @Bean
     @ConditionalOnMissingBean
-    public EntityMetadataRegistry entityMetadataRegistry() {
+    public EntityMetadataRegistry entityMetadataRegistry(CacheKitProperties props) {
+        // 启动期 fail-fast：L1 TTL 必须显著小于 L2 TTL，倒挂会造成"L2 已刷新、L1 永远旧"的顽疾
+        if (!props.getL1().getTtl().isZero() && !props.getL1().getTtl().isNegative()
+                && props.getL1().getTtl().compareTo(props.getL2().getTtl()) >= 0) {
+            throw new CacheKitException("cache-kit.l1.ttl(" + props.getL1().getTtl()
+                    + ") 必须小于 cache-kit.l2.ttl(" + props.getL2().getTtl() + ")："
+                    + "L1 TTL 倒挂会导致 L2 刷新后本地仍返回旧值");
+        }
+        log.info("cache-kit 启动: L1(maxEntries={}, maxWeightKb={}, ttl={}) L2(ttl={}, jitter={}, nullTtl={}, doubleDeleteDelay={}) broadcast({}, '{}') namespace='{}'",
+                props.getL1().getMaxEntries(), props.getL1().getMaxWeightKb(), props.getL1().getTtl(),
+                props.getL2().getTtl(), props.getL2().getJitter(), props.getL2().getNullTtl(),
+                props.getL2().getDoubleDeleteDelay(),
+                props.getBroadcast().isEnabled(), props.getBroadcast().getTopic(),
+                props.getKeyNamespace());
         return new EntityMetadataRegistry();
     }
 
@@ -67,10 +85,13 @@ public class CacheKitAutoConfiguration {
                                                ObjectProvider<RedisChannel> l2,
                                                ObjectProvider<InvalidationPublisher> publisher,
                                                DoubleDeleteScheduler doubleDeleteScheduler,
-                                               ObjectProvider<io.github.biglv666.cachekit.core.CacheKeyCustomizer> keyCustomizers) {
-        return new TieredEntityCache(props, l1, l2.getIfAvailable(),
+                                               ObjectProvider<io.github.biglv666.cachekit.core.CacheKeyCustomizer> keyCustomizers,
+                                               ObjectProvider<io.github.biglv666.cachekit.core.CacheMetricsListener> metrics) {
+        TieredEntityCache cache = new TieredEntityCache(props, l1, l2.getIfAvailable(),
                 publisher.getIfAvailable(NoopInvalidationPublisher::new), doubleDeleteScheduler,
                 props.getKeyNamespace(), keyCustomizers.stream().toList());
+        cache.setMetricsListener(metrics.getIfAvailable());
+        return cache;
     }
 
     @Bean
@@ -131,12 +152,34 @@ public class CacheKitAutoConfiguration {
         public RedisMessageListenerContainer cacheKitInvalidationContainer(RedisChannel l2Channel,
                                                                            CaffeineChannel l1Channel,
                                                                            EntityMetadataRegistry registry,
-                                                                           CacheKitProperties props) {
+                                                                           CacheKitProperties props,
+                                                                           ObjectProvider<io.github.biglv666.cachekit.core.CacheMetricsListener> metricsProvider) {
             RedisMessageListenerContainer container = new RedisMessageListenerContainer();
             container.setConnectionFactory(l2Channel.template().getConnectionFactory());
-            container.addMessageListener(new InvalidationSubscriber(l1Channel, registry, props.getKeyNamespace()),
+            InvalidationSubscriber subscriber = new InvalidationSubscriber(l1Channel, registry, props.getKeyNamespace());
+            subscriber.setMetricsListener(metricsProvider.getIfAvailable());
+            container.addMessageListener(subscriber,
                     new ChannelTopic(props.getBroadcast().getTopic()));
             return container;
+        }
+    }
+
+    /**
+     * Micrometer 指标条件装配：micrometer-core 在类路径时注册 cache-kit.* 计数器。
+     */
+    @Configuration(proxyBeanMethods = false)
+    @ConditionalOnClass(io.micrometer.core.instrument.MeterRegistry.class)
+    static class CacheKitMetricsConfiguration {
+
+        @Bean
+        @ConditionalOnMissingBean(io.github.biglv666.cachekit.core.CacheMetricsListener.class)
+        io.github.biglv666.cachekit.core.CacheMetricsListener cacheKitMetricsListener(ObjectProvider<io.micrometer.core.instrument.MeterRegistry> registryProvider) {
+            io.micrometer.core.instrument.MeterRegistry registry = registryProvider.getIfAvailable();
+            // micrometer 在类路径但宿主未定义 MeterRegistry（无 actuator）时退回空实现
+            return registry == null
+                    ? new io.github.biglv666.cachekit.core.CacheMetricsListener() {
+                    }
+                    : new MicrometerCacheMetrics(registry);
         }
     }
 

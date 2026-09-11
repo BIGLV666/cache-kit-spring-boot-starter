@@ -58,6 +58,15 @@ public class TieredEntityCache {
     /** single-flight：同 key 的并发回源合并为一个执行（单条与批量共用） */
     private final ConcurrentHashMap<String, CompletableFuture<Object>> inflight = new ConcurrentHashMap<>();
 
+    private volatile CacheMetricsListener metrics = new CacheMetricsListener() {
+    };
+
+    /** 挂载指标监听器（Micrometer 集成或自定义观测），未挂载时为空实现 */
+    public void setMetricsListener(CacheMetricsListener metrics) {
+        this.metrics = metrics == null ? new CacheMetricsListener() {
+        } : metrics;
+    }
+
     public TieredEntityCache(CacheKitProperties props,
                              CacheChannel l1,
                              CacheChannel l2,
@@ -118,6 +127,7 @@ public class TieredEntityCache {
         String key = key(meta, id);
 
         CacheEntry c1 = l1.get(key);
+        metrics.l1Lookup(c1.hit());
         Object v = c1.hit() ? decode(key, c1.json(), meta) : DECODE_FAILED;
         if (v != DECODE_FAILED) {
             return v == NULL_VALUE ? null : v;
@@ -125,6 +135,7 @@ public class TieredEntityCache {
 
         if (l2 != null) {
             CacheEntry c2 = l2Get(key);
+            metrics.l2Lookup(c2.hit());
             if (c2.hit()) {
                 v = decode(key, c2.json(), meta);
                 if (v != DECODE_FAILED) {
@@ -152,6 +163,7 @@ public class TieredEntityCache {
                         if (cacheNull) {
                             // null 占位：防穿透，两级都用短 TTL
                             putBoth(key, JsonCodec.NULL_SENTINEL, props.getL2().getNullTtl(), props.getL2().getNullTtl());
+                            metrics.nullPlaceholder();
                         }
                     } else {
                         // 序列化失败不丢业务数据：返回结果只是不缓存（实体含不支持的类型时）
@@ -165,6 +177,7 @@ public class TieredEntityCache {
                             putBoth(key, json, effectiveTtl(meta, ttlOverride), props.getL1().getTtl());
                         }
                     }
+                    metrics.dbLoad(1);
                     created.complete(db);
                     return db;
                 } catch (Throwable t) {
@@ -226,6 +239,7 @@ public class TieredEntityCache {
         if (!ownedIds.isEmpty()) {
             try {
                 List<Object> fresh = dbBatchLoader.apply(ownedIds);
+                metrics.dbLoad(ownedIds.size());
                 Map<String, Object> freshByKey = new LinkedHashMap<>();
                 for (Object entity : fresh) {
                     Object idValue = meta.idOf(entity);
@@ -251,6 +265,7 @@ public class TieredEntityCache {
                         if (cacheNull) {
                             putBoth(key(meta, id), JsonCodec.NULL_SENTINEL,
                                     props.getL2().getNullTtl(), props.getL2().getNullTtl());
+                            metrics.nullPlaceholder();
                         }
                         slots[ownedIdx.get(i)].complete(null);
                     }
@@ -401,6 +416,7 @@ public class TieredEntityCache {
         for (Object id : ids) {
             String key = key(meta, id);
             CacheEntry c1 = l1.get(key);
+            metrics.l1Lookup(c1.hit());
             CachePeek p = c1.hit() ? toPeek(decode(key, c1.json(), meta))
                     : new CachePeek(CachePeek.State.MISS, null);
             out.add(p);
@@ -415,12 +431,15 @@ public class TieredEntityCache {
                 // 通道不支持批量：逐键 get（同样降级语义）
                 l2res = new LinkedHashMap<>();
                 for (String key : missKeys) {
-                    l2res.put(key, l2Get(key));
+                    CacheEntry entry = l2Get(key);
+                    metrics.l2Lookup(entry.hit());
+                    l2res.put(key, entry);
                 }
             }
             for (int i = 0; i < missIdx.size(); i++) {
                 String key = missKeys.get(i);
                 CacheEntry entry = l2res.get(key);
+                metrics.l2Lookup(entry != null && entry.hit());
                 if (entry == null || !entry.hit()) {
                     continue;
                 }
@@ -444,11 +463,15 @@ public class TieredEntityCache {
     /** 单次完整删除：本地 L1 + L2 + 广播 */
     private void evictOnce(String key) {
         try {
-            l1.evict(key);
+            // 顺序关键：先删 L2 再删 L1——若反过来，间隙内并发读会 L1 miss 后从 L2
+            // 读到旧值并回填 L1，制造可复现的脏数据；L2 先删则该回填路径不存在
             if (l2 != null) {
                 l2Evict(key);
             }
+            l1.evict(key);
             publisher.publish(key);
+            metrics.broadcastSent();
+            metrics.evict(1);
         } catch (Exception e) {
             log.warn("缓存失效执行异常，key={}", key, e);
         }
