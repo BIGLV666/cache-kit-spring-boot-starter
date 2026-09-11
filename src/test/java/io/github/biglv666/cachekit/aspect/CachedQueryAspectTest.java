@@ -102,7 +102,7 @@ class CachedQueryAspectTest {
 
         AspectJProxyFactory factory = new AspectJProxyFactory(mapper);
         factory.addAspect(new CachedQueryAspect(cache, new EntityMetadataRegistry()));
-        factory.addAspect(new CacheInvalidateAspect(cache, new EntityMetadataRegistry()));
+        factory.addAspect(new CacheInvalidateAspect(cache, new EntityMetadataRegistry(), false));
         proxy = (UserQueryMapper) factory.getProxy();
     }
 

@@ -53,7 +53,7 @@ public class CacheKitAutoConfiguration {
         return new CaffeineChannel(props.getL1().getMaxEntries());
     }
 
-    @Bean
+    @Bean(destroyMethod = "shutdown")
     @ConditionalOnMissingBean
     public DoubleDeleteScheduler cacheKitDoubleDeleteScheduler(CacheKitProperties props) {
         return new DoubleDeleteScheduler(props.getL2().getDoubleDeleteDelay());
@@ -81,8 +81,9 @@ public class CacheKitAutoConfiguration {
     @Bean
     @ConditionalOnMissingBean
     public CacheInvalidateAspect cacheInvalidateAspect(TieredEntityCache tieredEntityCache,
-                                                       EntityMetadataRegistry registry) {
-        return new CacheInvalidateAspect(tieredEntityCache, registry);
+                                                       EntityMetadataRegistry registry,
+                                                       CacheKitProperties props) {
+        return new CacheInvalidateAspect(tieredEntityCache, registry, props.getTx().isEvictAfterCommit());
     }
 
     @Bean
@@ -148,8 +149,9 @@ public class CacheKitAutoConfiguration {
         @ConditionalOnProperty(prefix = "cache-kit.mp", name = "auto-cache-base-methods",
                 havingValue = "true", matchIfMissing = true)
         public MybatisPlusAutoCacheAspect mybatisPlusAutoCacheAspect(TieredEntityCache tieredEntityCache,
-                                                                     EntityMetadataRegistry registry) {
-            return new MybatisPlusAutoCacheAspect(tieredEntityCache, registry);
+                                                                     EntityMetadataRegistry registry,
+                                                                     CacheInvalidateAspect invalidationAspect) {
+            return new MybatisPlusAutoCacheAspect(tieredEntityCache, registry, invalidationAspect);
         }
     }
 

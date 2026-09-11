@@ -16,6 +16,7 @@ public class CacheKitProperties {
     private final Broadcast broadcast = new Broadcast();
     private final Mp mp = new Mp();
     private final Binlog binlog = new Binlog();
+    private final Tx tx = new Tx();
 
     public boolean isEnabled() {
         return enabled;
@@ -23,6 +24,10 @@ public class CacheKitProperties {
 
     public void setEnabled(boolean enabled) {
         this.enabled = enabled;
+    }
+
+    public Tx getTx() {
+        return tx;
     }
 
     public L1 getL1() {
@@ -43,6 +48,26 @@ public class CacheKitProperties {
 
     public Binlog getBinlog() {
         return binlog;
+    }
+
+    /**
+     * 事务失效配置
+     */
+    public static class Tx {
+        /**
+         * 写方法处于活动事务时，缓存失效延迟到 afterCommit 执行：
+         * 消除"删除发生在事务提交前，并发读回填旧值"的窗口。
+         * 事务回滚则不失效（数据未变）。
+         */
+        private boolean evictAfterCommit = true;
+
+        public boolean isEvictAfterCommit() {
+            return evictAfterCommit;
+        }
+
+        public void setEvictAfterCommit(boolean evictAfterCommit) {
+            this.evictAfterCommit = evictAfterCommit;
+        }
     }
 
     /**

@@ -44,11 +44,14 @@ public class MybatisPlusAutoCacheAspect {
 
     private final TieredEntityCache tieredCache;
     private final EntityMetadataRegistry registry;
+    private final CacheInvalidateAspect invalidationDelegate;
     private final Map<Class<?>, Optional<Class<?>>> entityClassCache = new ConcurrentHashMap<>();
 
-    public MybatisPlusAutoCacheAspect(TieredEntityCache tieredCache, EntityMetadataRegistry registry) {
+    public MybatisPlusAutoCacheAspect(TieredEntityCache tieredCache, EntityMetadataRegistry registry,
+                                      CacheInvalidateAspect invalidationDelegate) {
         this.tieredCache = tieredCache;
         this.registry = registry;
+        this.invalidationDelegate = invalidationDelegate;
     }
 
     @Around("execution(* com.baomidou.mybatisplus.core.mapper.BaseMapper+.*(..))")
@@ -85,7 +88,8 @@ public class MybatisPlusAutoCacheAspect {
                 Object result = pjp.proceed();
                 Object id = idFromArg(args[0], meta);
                 if (id != null) {
-                    tieredCache.evict(meta, id);
+                    // 事务感知失效：与 @CacheInvalidate 同一钩子（afterCommit 或立即）
+                    invalidationDelegate.evictSmart(meta, id);
                 }
                 return result;
             }

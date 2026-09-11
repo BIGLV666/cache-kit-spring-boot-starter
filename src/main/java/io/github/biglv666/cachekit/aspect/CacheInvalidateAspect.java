@@ -20,22 +20,48 @@ import java.util.concurrent.ConcurrentHashMap;
  * 由 {@link TieredEntityCache#evict} 负责广播与延迟双删。
  *
  * <p>实体类型解析：注解显式指定 &gt; 参数中的实体实例；两者都无法确定时打一次警告并跳过。
+ * 事务感知：方法处于活动事务时失效延迟到 afterCommit（消除"删除在提交前、并发读回填旧值"
+ * 的窗口），由 {@code cache-kit.tx.evict-after-commit} 控制（默认开）。</p>
  */
 @Aspect
 public class CacheInvalidateAspect {
 
     private static final Logger log = LoggerFactory.getLogger(CacheInvalidateAspect.class);
 
+    private static final boolean SPRING_TX_PRESENT = detectSpringTx();
+
     private final TieredEntityCache tieredCache;
     private final EntityMetadataRegistry registry;
     private final PrimaryKeyResolver primaryKeyResolver;
+    private final boolean evictAfterCommit;
 
     private final Set<Method> unsupportedWarned = ConcurrentHashMap.newKeySet();
 
-    public CacheInvalidateAspect(TieredEntityCache tieredCache, EntityMetadataRegistry registry) {
+    public CacheInvalidateAspect(TieredEntityCache tieredCache, EntityMetadataRegistry registry,
+                                 boolean evictAfterCommit) {
         this.tieredCache = tieredCache;
         this.registry = registry;
         this.primaryKeyResolver = new PrimaryKeyResolver(registry);
+        this.evictAfterCommit = evictAfterCommit;
+    }
+
+    private static boolean detectSpringTx() {
+        try {
+            Class.forName("org.springframework.transaction.support.TransactionSynchronizationManager");
+            return true;
+        } catch (ClassNotFoundException | LinkageError e) {
+            return false;
+        }
+    }
+
+    /** 失效入口：spring-tx 存在且开启配置时走事务感知路径，否则立即失效。供 MP 自动切面复用 */
+    public void evictSmart(EntityMetadata meta, Object id) {
+        Runnable action = () -> tieredCache.evict(meta, id);
+        if (evictAfterCommit && SPRING_TX_PRESENT) {
+            TransactionAwareEvictor.evict(action);
+        } else {
+            action.run();
+        }
     }
 
     @AfterReturning(pointcut = "@annotation(cacheInvalidate)")
@@ -57,7 +83,7 @@ public class CacheInvalidateAspect {
             }
             return;
         }
-        tieredCache.evict(meta, id);
+        evictSmart(meta, id);
     }
 
     private EntityMetadata resolveMeta(CacheInvalidate cacheInvalidate, Object[] args) {

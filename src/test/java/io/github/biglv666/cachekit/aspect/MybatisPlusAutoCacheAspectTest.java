@@ -75,7 +75,7 @@ class MybatisPlusAutoCacheAspectTest {
                 new DoubleDeleteScheduler(Duration.ofMillis(50)));
 
         AspectJProxyFactory factory = new AspectJProxyFactory(mapper);
-        factory.addAspect(new MybatisPlusAutoCacheAspect(cache, new EntityMetadataRegistry()));
+        factory.addAspect(new MybatisPlusAutoCacheAspect(cache, new EntityMetadataRegistry(), new CacheInvalidateAspect(cache, new EntityMetadataRegistry(), false)));
         proxy = (MpUserMapper) factory.getProxy();
     }
 

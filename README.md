@@ -133,6 +133,8 @@ cache-kit:
     topic: cache-kit:invalidate
   mp:                      # MyBatis-Plus 适配
     auto-cache-base-methods: true  # BaseMapper 内置方法（selectById/updateById/deleteById）自动接入
+  tx:                     # 事务感知失效（spring-tx 在类路径时生效）
+    evict-after-commit: true       # 写方法处于活动事务时，失效延迟到 afterCommit；回滚不失效
   binlog:                  # binlog 直连失效（0.2.0+，缺省关闭）
     enabled: false
     host:                  # 缺省从 spring.datasource.url 解析
@@ -169,10 +171,18 @@ cache-kit:
 - 不做 write-through / write-behind：写库由业务代码完成，本组件只负责失效
 - 不接管持久层：与 MyBatis/MP 的关系仅是元数据 + AOP
 - 复合主键不支持
-- `@CacheInvalidate` 所在方法若为事务方法，删除发生在方法返回时（事务提交前）——延迟双删覆盖绝大多数窗口，严格场景请确保删除在提交后
+- 写方法处于活动事务时，失效延迟到 **afterCommit** 执行（`cache-kit.tx.evict-after-commit`，默认开），事务回滚不失效
 - binlog 模式下主键列序号来自 `information_schema`，改表结构会自动重新解析（按表缓存的序号在进程生命周期内有效）
 
-## FAQ
+## 稳健性设计
+
+- **L2 故障降级**：Redis 宕机时按未命中处理（限频告警），业务读写绝不因 L2 失败而失败，由 L1/DB 兜底
+- **序列化失败不丢数据**：实体含 Jackson 无法序列化的结构（自引用等）时，本次结果照常返回、只是不缓存
+- **双删积压保护**：延迟双删任务积压超过 10000 条时跳过新任务并限频告警（脏数据由 TTL 上界兜底）
+- **广播来源校验**：订阅器只清除键前缀能匹配已知实体的广播，防任意客户端清空缓存
+- **Jackson 无多态反序列化**：未启用 default typing，不存在反序列化 gadget 面
+
+$1
 
 **Mapper XML 打包后报 `Invalid bound statement`？**
 这是 MyBatis-Plus 路径大小写问题，与本组件无关但高频踩坑：XML 放在 `resources/Mapper/`（大写）时，`classpath*:/mapper/*.xml` 在 IDE 目录模式能碰巧匹配（NTFS 大小写不敏感），打 jar 后必失败。显式配置 `mybatis-plus.mapper-locations: classpath*:/Mapper/*.xml`。
