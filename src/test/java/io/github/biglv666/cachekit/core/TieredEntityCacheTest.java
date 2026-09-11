@@ -1,5 +1,6 @@
 package io.github.biglv666.cachekit.core;
 
+import io.github.biglv666.cachekit.channel.CacheChannel;
 import io.github.biglv666.cachekit.config.CacheKitProperties;
 import io.github.biglv666.cachekit.metadata.EntityMetadata;
 import io.github.biglv666.cachekit.metadata.EntityMetadataRegistry;
@@ -209,5 +210,100 @@ class TieredEntityCacheTest {
             }
         }
         assertThat(loaderCount.get()).isEqualTo(2);
+    }
+
+    @Test
+    void redisDownShouldDegradeGracefully() {
+        // L2 通道抛异常（Redis 宕机模拟）：读不失败、写不失败、失效不失败
+        CacheChannel brokenL2 = new InMemoryChannel() {
+            @Override
+            public io.github.biglv666.cachekit.channel.CacheEntry get(String key) {
+                throw new IllegalStateException("redis down");
+            }
+
+            @Override
+            public void put(String key, String json, Duration ttl) {
+                throw new IllegalStateException("redis down");
+            }
+
+            @Override
+            public void evict(String key) {
+                throw new IllegalStateException("redis down");
+            }
+        };
+        TieredEntityCache degraded = new TieredEntityCache(new CacheKitProperties(), l1, brokenL2,
+                publisher, new DoubleDeleteScheduler(Duration.ofMillis(50)));
+        AtomicInteger loaderCount = new AtomicInteger();
+
+        Object first = degraded.load(meta, 1L, null, true, () -> {
+            loaderCount.incrementAndGet();
+            return new UserEntity(1L, "lv");
+        });
+        // 第二次读：L2 故障不影响 L1 命中（L1 正常工作），不应抛异常
+        Object second = degraded.load(meta, 1L, null, true, () -> {
+            loaderCount.incrementAndGet();
+            return new UserEntity(1L, "lv");
+        });
+        degraded.evict(meta, 1L);
+        degraded.peekBatch(meta, List.of(1L, 2L));
+
+        assertThat(first).isEqualTo(new UserEntity(1L, "lv"));
+        assertThat(second).isEqualTo(new UserEntity(1L, "lv"));
+        // L2 put 失败被吞掉后，L1 仍有值：第二次读命中 L1，无需回源
+        assertThat(loaderCount.get()).as("L1 正常时第二次读命中 L1").isEqualTo(1);
+    }
+
+    @Test
+    void serializationFailureShouldNotLoseData() {
+        EntityMetadata badMeta = new EntityMetadataRegistry()
+                .require(io.github.biglv666.cachekit.model.UnserializableEntity.class);
+        AtomicInteger loaderCount = new AtomicInteger();
+
+        Object first = cache.load(badMeta, 1L, null, true, () -> {
+            loaderCount.incrementAndGet();
+            return newUnserializable(1L);
+        });
+        System.out.println("[DBG] l1 after first load = " + l1.store + " , first=" + first);
+        Object second = cache.load(badMeta, 1L, null, true, () -> {
+            loaderCount.incrementAndGet();
+            return newUnserializable(1L);
+        });
+
+        // 序列化失败不抛异常、不缓存，但业务结果必须原样返回（实体无 equals，按非空断言）
+        assertThat(first).isNotNull();
+        assertThat(second).isNotNull();
+        assertThat(loaderCount.get()).as("不可序列化 → 不缓存，每次回源").isEqualTo(2);
+        assertThat(l1.store).doesNotContainKey("unserializable_entity:1");
+    }
+
+    private io.github.biglv666.cachekit.model.UnserializableEntity newUnserializable(Long id) {
+        io.github.biglv666.cachekit.model.UnserializableEntity e =
+                new io.github.biglv666.cachekit.model.UnserializableEntity();
+        e.setId(id);
+        e.setSelf(e);   // 自引用：Jackson 无限递归，序列化必然失败
+        return e;
+    }
+
+    @Test
+    void peekBatchShouldReturnThreeStatesInOrder() {
+        cache.load(meta, 1L, null, true, () -> new UserEntity(1L, "lv"));       // 1 → 有值
+        cache.load(meta, 2L, null, true, () -> null);                            // 2 → null 占位
+
+        List<TieredEntityCache.CachePeek> peeks = cache.peekBatch(meta, List.of(1L, 2L, 3L));
+        assertThat(peeks.get(0).state()).isEqualTo(TieredEntityCache.CachePeek.State.HIT);
+        assertThat(peeks.get(1).state()).isEqualTo(TieredEntityCache.CachePeek.State.HIT_NULL);
+        assertThat(peeks.get(2).state()).isEqualTo(TieredEntityCache.CachePeek.State.MISS);
+    }
+
+    @Test
+    void evictBatchShouldCoalesceDoubleDelete() {
+        cache.load(meta, 1L, null, true, () -> new UserEntity(1L, "a"));
+        cache.load(meta, 2L, null, true, () -> new UserEntity(2L, "b"));
+
+        cache.evictBatch(meta, List.of(1L, 2L), true);
+
+        assertThat(l1.store).doesNotContainKey("user_entity:1");
+        assertThat(l1.store).doesNotContainKey("user_entity:2");
+        assertThat(publisher.published).contains("user_entity:1", "user_entity:2");
     }
 }

@@ -84,22 +84,26 @@ class RedisChannelTest {
     @Test
     void broadcastShouldEvictRemoteL1() throws Exception {
         CaffeineChannel l1 = new CaffeineChannel(128);
-        l1.put("cache-kit-test:broadcast", "v", Duration.ofSeconds(30));
+        // 订阅器只清"已知实体前缀"的键：先解析实体元数据再广播其键
+        io.github.biglv666.cachekit.metadata.EntityMetadataRegistry registry =
+                new io.github.biglv666.cachekit.metadata.EntityMetadataRegistry();
+        registry.find(io.github.biglv666.cachekit.binlog.BinTestUser.class);
+        l1.put("user_bin:1", "v", Duration.ofSeconds(30));
 
         RedisMessageListenerContainer container = new RedisMessageListenerContainer();
         container.setConnectionFactory(factory);
         String topic = "cache-kit:test-invalidate";
-        container.addMessageListener(new InvalidationSubscriber(l1), new ChannelTopic(topic));
+        container.addMessageListener(new InvalidationSubscriber(l1, registry), new ChannelTopic(topic));
         container.afterPropertiesSet();
         container.start();
         try {
-            new RedisInvalidationPublisher(template, topic).publish("cache-kit-test:broadcast");
+            new RedisInvalidationPublisher(template, topic).publish("user_bin:1");
             // pub/sub 异步，轮询等待
             long deadline = System.currentTimeMillis() + 3000;
-            while (l1.get("cache-kit-test:broadcast").hit() && System.currentTimeMillis() < deadline) {
+            while (l1.get("user_bin:1").hit() && System.currentTimeMillis() < deadline) {
                 Thread.sleep(50);
             }
-            assertThat(l1.get("cache-kit-test:broadcast")).isEqualTo(CacheEntry.miss());
+            assertThat(l1.get("user_bin:1")).isEqualTo(CacheEntry.miss());
         } finally {
             container.stop();
             container.destroy();

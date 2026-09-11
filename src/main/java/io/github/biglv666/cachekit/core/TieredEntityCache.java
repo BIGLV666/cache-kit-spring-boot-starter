@@ -11,7 +11,9 @@ import org.slf4j.LoggerFactory;
 
 import java.time.Duration;
 import java.util.ArrayList;
+import java.util.LinkedHashMap;
 import java.util.List;
+import java.util.Map;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CompletionException;
 import java.util.concurrent.ConcurrentHashMap;
@@ -89,7 +91,7 @@ public class TieredEntityCache {
         }
 
         if (l2 != null) {
-            CacheEntry c2 = l2.get(key);
+            CacheEntry c2 = l2Get(key);
             if (c2.hit()) {
                 v = decode(key, c2.json(), meta);
                 if (v != DECODE_FAILED) {
@@ -119,7 +121,16 @@ public class TieredEntityCache {
                             putBoth(key, JsonCodec.NULL_SENTINEL, props.getL2().getNullTtl(), props.getL2().getNullTtl());
                         }
                     } else {
-                        putBoth(key, JsonCodec.write(db), effectiveTtl(meta, ttlOverride), props.getL1().getTtl());
+                        // 序列化失败不丢业务数据：返回结果只是不缓存（实体含不支持的类型时）
+                        String json = null;
+                        try {
+                            json = JsonCodec.write(db);
+                        } catch (Exception e) {
+                            log.warn("缓存值序列化失败，本次结果不缓存: {}", meta.entityType().getName(), e);
+                        }
+                        if (json != null) {
+                            putBoth(key, json, effectiveTtl(meta, ttlOverride), props.getL1().getTtl());
+                        }
                     }
                     created.complete(db);
                     return db;
@@ -178,7 +189,7 @@ public class TieredEntityCache {
             return toPeek(decode(key, c1.json(), meta));
         }
         if (l2 != null) {
-            CacheEntry c2 = l2.get(key);
+            CacheEntry c2 = l2Get(key);
             if (c2.hit()) {
                 Object v = decode(key, c2.json(), meta);
                 if (v != DECODE_FAILED) {
@@ -192,6 +203,51 @@ public class TieredEntityCache {
         return new CachePeek(CachePeek.State.MISS, null);
     }
 
+    /** L2 全部调用经此降级：通道抛异常（Redis 宕机等）按未命中处理，限频告警，绝不阻断业务读写 */
+    private CacheEntry l2Get(String key) {
+        try {
+            return l2.get(key);
+        } catch (Exception e) {
+            warnL2Failure("get", e);
+            return CacheEntry.miss();
+        }
+    }
+
+    private Map<String, CacheEntry> l2MultiGet(List<String> keys) {
+        try {
+            return l2.multiGet(keys);
+        } catch (Exception e) {
+            warnL2Failure("multiGet", e);
+            return null;
+        }
+    }
+
+    private void l2Put(String key, String json, Duration ttl) {
+        try {
+            l2.put(key, json, ttl);
+        } catch (Exception e) {
+            warnL2Failure("put", e);
+        }
+    }
+
+    private void l2Evict(String key) {
+        try {
+            l2.evict(key);
+        } catch (Exception e) {
+            warnL2Failure("evict", e);
+        }
+    }
+
+    private volatile long lastL2WarnAt;
+
+    private void warnL2Failure(String op, Exception e) {
+        long now = System.nanoTime();
+        if (now - lastL2WarnAt > 30_000_000_000L) {
+            lastL2WarnAt = now;
+            log.warn("L2 通道 {} 失败，降级为不可用（本告警 30s 内不重复）: {}", op, e.getMessage());
+        }
+    }
+
     private CachePeek toPeek(Object decoded) {
         if (decoded == DECODE_FAILED) {
             return new CachePeek(CachePeek.State.MISS, null);
@@ -202,9 +258,62 @@ public class TieredEntityCache {
         return new CachePeek(CachePeek.State.HIT, decoded);
     }
 
-    /** 批量流程写回单个命中实体（TTL 与单条 read-through 一致） */
+    /** 批量流程写回单个命中实体（序列化失败只跳过缓存，不抛出） */
     public void cachePut(EntityMetadata meta, Object id, Object value, Duration ttlOverride) {
-        putBoth(meta.keyOf(id), JsonCodec.write(value), effectiveTtl(meta, ttlOverride), props.getL1().getTtl());
+        String json;
+        try {
+            json = JsonCodec.write(value);
+        } catch (Exception e) {
+            log.warn("缓存值序列化失败，跳过缓存: {}", meta.entityType().getName(), e);
+            return;
+        }
+        putBoth(meta.keyOf(id), json, effectiveTtl(meta, ttlOverride), props.getL1().getTtl());
+    }
+
+    /**
+     * 批量三态窥探：L1 逐键（本地内存），L2 缺失部分走 {@link CacheChannel#multiGet}（MGET 管道）。
+     * 结果顺序与入参 ids 一一对应。
+     */
+    public List<CachePeek> peekBatch(EntityMetadata meta, List<Object> ids) {
+        List<CachePeek> out = new ArrayList<>(ids.size());
+        List<String> missKeys = new ArrayList<>();
+        List<Integer> missIdx = new ArrayList<>();
+        for (Object id : ids) {
+            String key = meta.keyOf(id);
+            CacheEntry c1 = l1.get(key);
+            CachePeek p = c1.hit() ? toPeek(decode(key, c1.json(), meta))
+                    : new CachePeek(CachePeek.State.MISS, null);
+            out.add(p);
+            if (p.state() == CachePeek.State.MISS) {
+                missKeys.add(key);
+                missIdx.add(out.size() - 1);
+            }
+        }
+        if (!missKeys.isEmpty() && l2 != null) {
+            Map<String, CacheEntry> l2res = l2MultiGet(missKeys);
+            if (l2res == null) {
+                // 通道不支持批量：逐键 get（同样降级语义）
+                l2res = new LinkedHashMap<>();
+                for (String key : missKeys) {
+                    l2res.put(key, l2Get(key));
+                }
+            }
+            for (int i = 0; i < missIdx.size(); i++) {
+                String key = missKeys.get(i);
+                CacheEntry entry = l2res.get(key);
+                if (entry == null || !entry.hit()) {
+                    continue;
+                }
+                CachePeek p = toPeek(decode(key, entry.json(), meta));
+                if (p.state() != CachePeek.State.MISS) {
+                    if (p.state() == CachePeek.State.HIT) {
+                        l1.put(key, entry.json(), props.getL1().getTtl());
+                    }
+                    out.set(missIdx.get(i), p);
+                }
+            }
+        }
+        return out;
     }
 
     /** 批量流程写回"已缓存空"占位（防穿透） */
@@ -217,7 +326,7 @@ public class TieredEntityCache {
         try {
             l1.evict(key);
             if (l2 != null) {
-                l2.evict(key);
+                l2Evict(key);
             }
             publisher.publish(key);
         } catch (Exception e) {
@@ -227,7 +336,7 @@ public class TieredEntityCache {
 
     private void putBoth(String key, String json, Duration l2Ttl, Duration l1Ttl) {
         if (l2 != null) {
-            l2.put(key, json, l2Ttl);
+            l2Put(key, json, l2Ttl);
         }
         l1.put(key, json, l1Ttl);
     }

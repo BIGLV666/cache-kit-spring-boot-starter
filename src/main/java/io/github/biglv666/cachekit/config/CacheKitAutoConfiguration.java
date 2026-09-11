@@ -127,10 +127,11 @@ public class CacheKitAutoConfiguration {
                 havingValue = "true", matchIfMissing = true)
         public RedisMessageListenerContainer cacheKitInvalidationContainer(RedisChannel l2Channel,
                                                                            CaffeineChannel l1Channel,
+                                                                           EntityMetadataRegistry registry,
                                                                            CacheKitProperties props) {
             RedisMessageListenerContainer container = new RedisMessageListenerContainer();
             container.setConnectionFactory(l2Channel.template().getConnectionFactory());
-            container.addMessageListener(new InvalidationSubscriber(l1Channel),
+            container.addMessageListener(new InvalidationSubscriber(l1Channel, registry),
                     new ChannelTopic(props.getBroadcast().getTopic()));
             return container;
         }

@@ -59,14 +59,16 @@ public final class BatchCacheResolver {
 
         Map<String, Object> resolved = new LinkedHashMap<>();
         List<Object> missing = new ArrayList<>();
-        for (Map.Entry<String, Object> e : requestedByKey.entrySet()) {
-            TieredEntityCache.CachePeek p = cache.peek(meta, e.getValue());
-            switch (p.state()) {
-                case HIT -> resolved.put(e.getKey(), p.value());
+        List<Object> orderedIds = new ArrayList<>(requestedByKey.values());
+        List<TieredEntityCache.CachePeek> peeks = cache.peekBatch(meta, orderedIds);
+        for (int i = 0; i < orderedIds.size(); i++) {
+            String k = String.valueOf(orderedIds.get(i));
+            switch (peeks.get(i).state()) {
+                case HIT -> resolved.put(k, peeks.get(i).value());
                 case HIT_NULL -> {
                     // 已知不存在：IN 语义下从结果消失
                 }
-                case MISS -> missing.add(e.getValue());
+                case MISS -> missing.add(orderedIds.get(i));
             }
         }
 

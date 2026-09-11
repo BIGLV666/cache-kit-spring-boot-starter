@@ -148,23 +148,33 @@ public class MybatisPlusAutoCacheAspect {
         return value instanceof String || value instanceof Number;
     }
 
-    /** 从 mapper 对象实现的 BaseMapper&lt;E&gt; 泛型解析实体类，结果按 mapper 类缓存 */
+    /** 从 mapper 对象实现的 BaseMapper&lt;E&gt; 泛型解析实体类（递归遍历接口层级，兼容多重代理），按 mapper 类缓存 */
     private Class<?> entityClassOf(Object target) {
         return entityClassCache
                 .computeIfAbsent(target.getClass(), clazz -> {
-                    for (Class<?> ifc : clazz.getInterfaces()) {
-                        if (BaseMapper.class.isAssignableFrom(ifc)) {
-                            Class<?> entity = ResolvableType.forClass(ifc)
-                                    .as(BaseMapper.class)
-                                    .getGeneric(0)
-                                    .resolve();
-                            if (entity != null) {
-                                return Optional.of(entity);
-                            }
-                        }
+                    Class<?> mapperInterface = findBaseMapperInterface(clazz);
+                    if (mapperInterface == null) {
+                        return Optional.empty();
                     }
-                    return Optional.empty();
+                    Class<?> entity = ResolvableType.forClass(mapperInterface)
+                            .as(BaseMapper.class)
+                            .getGeneric(0)
+                            .resolve();
+                    return Optional.ofNullable(entity);
                 })
                 .orElse(null);
+    }
+
+    private Class<?> findBaseMapperInterface(Class<?> clazz) {
+        for (Class<?> ifc : clazz.getInterfaces()) {
+            if (BaseMapper.class.isAssignableFrom(ifc)) {
+                return ifc;
+            }
+            Class<?> nested = findBaseMapperInterface(ifc);
+            if (nested != null) {
+                return nested;
+            }
+        }
+        return null;
     }
 }
