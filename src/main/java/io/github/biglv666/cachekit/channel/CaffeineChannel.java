@@ -24,8 +24,9 @@ public class CaffeineChannel implements CacheChannel {
 
     /**
      * @param maxEntries  最大条目数（maxWeightKb &le; 0 时生效）
-     * @param maxWeightKb 权重上限（KB，按序列化 JSON 长度计）：&gt;0 时启用基于权重的淘汰，
-     *                    防止少量大实体（含大字段）撑爆本地内存
+     * @param maxWeightKb 权重上限（单位：K 字符，按序列化 JSON 的 UTF-16 字符数计，非字节）：
+     *                    &gt;0 时启用基于权重的淘汰，防止少量大实体（含大字段）撑爆本地内存。
+     *                    中文等 BMP 字符 JVM 内存占用约为字符数 2 倍，实际内存上限 ≈ maxWeightKb × 2KB
      */
     public CaffeineChannel(long maxEntries, long maxWeightKb) {
         com.github.benmanes.caffeine.cache.Caffeine<Object, Object> builder = Caffeine.newBuilder();
@@ -66,6 +67,8 @@ public class CaffeineChannel implements CacheChannel {
 
     @Override
     public void put(String key, String json, Duration ttl) {
+        // 非正 TTL 的统一语义是"跳过写入（禁用该级缓存）"，不是"永不过期"——
+        // 组件的脏数据安全模型建立在 TTL 上界之上
         if (ttl == null || ttl.isZero() || ttl.isNegative()) {
             return;
         }

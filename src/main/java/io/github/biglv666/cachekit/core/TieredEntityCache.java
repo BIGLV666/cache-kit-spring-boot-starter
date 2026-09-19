@@ -4,6 +4,7 @@ import io.github.biglv666.cachekit.channel.CacheChannel;
 import io.github.biglv666.cachekit.channel.CacheEntry;
 import io.github.biglv666.cachekit.config.CacheKitProperties;
 import io.github.biglv666.cachekit.exception.CacheKitException;
+import io.github.biglv666.cachekit.exception.IdMisfireException;
 import io.github.biglv666.cachekit.metadata.EntityMetadata;
 import io.github.biglv666.cachekit.support.JsonCodec;
 import org.slf4j.Logger;
@@ -12,8 +13,10 @@ import org.slf4j.LoggerFactory;
 import java.time.Duration;
 import java.util.ArrayList;
 import java.util.LinkedHashMap;
+import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CompletionException;
 import java.util.concurrent.ConcurrentHashMap;
@@ -26,7 +29,8 @@ import java.util.function.Supplier;
  * 命中逐级回填；写路径"先写 DB 后删缓存"，删除含广播与延迟双删。
  *
  * <p>并发控制：同 key 回源经 single-flight 合并，防击穿；null 结果按配置短 TTL 缓存防穿透；
- * TTL 追加随机抖动防雪崩。一致性语义为秒级最终一致（见 README）。</p>
+ * TTL 追加随机抖动防雪崩。一致性语义为最终一致：常态秒级（双删窗口内），最坏受 L2 TTL
+ * 上界约束——回填竞态可能把旧值写回 L2（详见 README 一致性章节）。</p>
  */
 public class TieredEntityCache {
 
@@ -98,7 +102,15 @@ public class TieredEntityCache {
     private String key(EntityMetadata meta, Object id) {
         StringBuilder sb = new StringBuilder();
         for (CacheKeyCustomizer customizer : keyCustomizers) {
-            String segment = customizer.segment();
+            String segment;
+            try {
+                segment = customizer.segment();
+            } catch (Exception e) {
+                // SPI 异常按"无段"降级并限频告警：绝不打断读/写/失效主流程
+                //（批量注册路径若被 SPI 异常打断，inflight 会残留未完成 future 挂死后续读）
+                warnKeyCustomizerFailure(customizer, e);
+                continue;
+            }
             if (segment != null && !segment.isBlank()) {
                 sb.append(segment).append(':');
             }
@@ -124,6 +136,10 @@ public class TieredEntityCache {
         if (BypassContext.isActive()) {
             return loader.get();
         }
+        if (id == null) {
+            // null 主键会产生 "前缀:null" 键并与字面 "null" 主键冲突，直接拒绝
+            throw new CacheKitException("缓存读取的主键不能为 null: " + meta.entityType().getName());
+        }
         String key = key(meta, id);
 
         CacheEntry c1 = l1.get(key);
@@ -140,8 +156,9 @@ public class TieredEntityCache {
                 v = decode(key, c2.json(), meta);
                 if (v != DECODE_FAILED) {
                     if (v != NULL_VALUE) {
-                        // L2 命中回填 L1，TTL 用 L1 全局配置
-                        l1.put(key, c2.json(), props.getL1().getTtl());
+                        // L2 命中回填 L1，TTL 取 l1.ttl 与该实体生效 L2 基准的较小值，
+                        // 保证"L1 是更短的脏读上界"不因实体级/方法级 TTL 覆盖而倒装
+                        l1.put(key, c2.json(), l1TtlFor(effectiveBase(meta, null)));
                     }
                     return v == NULL_VALUE ? null : v;
                 }
@@ -159,12 +176,17 @@ public class TieredEntityCache {
                 // 本线程赢得回源权
                 try {
                     Object db = loader.get();
+                    // 等待者拿到的是可物化载荷（JSON 串/null 占位）而非实体实例：
+                    // 各自 decode 出新对象，避免 single-flight 等待者共享同一可变实例被并发污染
+                    Object payload;
                     if (db == null) {
                         if (cacheNull) {
                             // null 占位：防穿透，两级都用短 TTL
-                            putBoth(key, JsonCodec.NULL_SENTINEL, props.getL2().getNullTtl(), props.getL2().getNullTtl());
+                            Duration nullTtl = props.getL2().getNullTtl();
+                            putBoth(key, JsonCodec.NULL_SENTINEL, nullTtl, l1TtlFor(nullTtl));
                             metrics.nullPlaceholder();
                         }
+                        payload = cacheNull ? JsonCodec.NULL_SENTINEL : null;
                     } else {
                         // 序列化失败不丢业务数据：返回结果只是不缓存（实体含不支持的类型时）
                         String json = null;
@@ -174,11 +196,16 @@ public class TieredEntityCache {
                             log.warn("缓存值序列化失败，本次结果不缓存: {}", meta.entityType().getName(), e);
                         }
                         if (json != null) {
-                            putBoth(key, json, effectiveTtl(meta, ttlOverride), props.getL1().getTtl());
+                            putBoth(key, json, effectiveTtl(meta, ttlOverride),
+                                    l1TtlFor(effectiveBase(meta, ttlOverride)));
+                            payload = json;
+                        } else {
+                            // 不可序列化的罕见兜底：等待者只能共享该实例（本就不会进缓存）
+                            payload = db;
                         }
                     }
                     metrics.dbLoad(1);
-                    created.complete(db);
+                    created.complete(payload);
                     return db;
                 } catch (Throwable t) {
                     created.completeExceptionally(t);
@@ -191,18 +218,30 @@ public class TieredEntityCache {
         }
 
         try {
-            return inflightFuture.join();
+            return materialize(meta, key, inflightFuture.join());
         } catch (CompletionException e) {
             Throwable cause = e.getCause() != null ? e.getCause() : e;
             throw cause instanceof RuntimeException re ? re : new CacheKitException(cause);
         }
     }
 
+    /** single-flight 载荷 → 实体：JSON 串 decode 出新实例，null/null 占位 → null */
+    private Object materialize(EntityMetadata meta, String key, Object payload) {
+        if (payload == null) {
+            return null;
+        }
+        if (payload instanceof String json) {
+            Object v = decode(key, json, meta);
+            return v == DECODE_FAILED ? null : v == NULL_VALUE ? null : v;
+        }
+        return payload;
+    }
+
     /**
      * 失效：立即执行一次完整删除，并按配置调度延迟双删。
      */
     public void evict(EntityMetadata meta, Object id) {
-        evictBatch(meta, List.of(id), true);
+        evictBatch(meta, List.of(id));
     }
 
     /**
@@ -219,21 +258,54 @@ public class TieredEntityCache {
      */
     public Object[] loadBatch(EntityMetadata meta, List<Object> ids, boolean cacheNull,
                               Duration ttlOverride, Function<List<Object>, List<Object>> dbBatchLoader) {
+        return loadBatch(meta, ids, cacheNull, ttlOverride, dbBatchLoader, false);
+    }
+
+    /**
+     * 带严格模式守卫的批量 read-through：{@code strictIds} 为 true 时（注解列表查询路径），
+     * 回源结果的主键必须全部能对上请求值，且结果非空——对不上或为空说明请求集合不是主键集合
+     * （如把手机号列表当 ID 拆解），抛出携带回源原始结果的 {@link IdMisfireException}，
+     * 由调用方按条件查询旁路（警告 + 不缓存 + 原样返回），绝不返回空数据或写错键占位。
+     * 空结果同样旁路：无法证明请求值是主键，给它写 null 占位的话，占位键永远不会被
+     * 该行后续 insert 的失效命中（insert 失效走真实主键）。
+     * MP {@code selectBatchIds} 路径请求值即主键，无需开启。
+     */
+    public Object[] loadBatch(EntityMetadata meta, List<Object> ids, boolean cacheNull,
+                              Duration ttlOverride, Function<List<Object>, List<Object>> dbBatchLoader,
+                              boolean strictIds) {
         int n = ids.size();
         @SuppressWarnings("unchecked")
         CompletableFuture<Object>[] slots = new CompletableFuture[n];
+        String[] keys = new String[n];
         List<Integer> ownedIdx = new ArrayList<>();
         List<Object> ownedIds = new ArrayList<>();
-        for (int i = 0; i < n; i++) {
-            CompletableFuture<Object> created = new CompletableFuture<>();
-            CompletableFuture<Object> prev = inflight.putIfAbsent(key(meta, ids.get(i)), created);
-            if (prev == null) {
-                slots[i] = created;
-                ownedIdx.add(i);
-                ownedIds.add(ids.get(i));
-            } else {
-                slots[i] = prev;
+        try {
+            for (int i = 0; i < n; i++) {
+                Object id = ids.get(i);
+                if (id == null) {
+                    // null 主键不进缓存链：槽直接按"不存在"完成（对齐 evictBatch 的判空）
+                    slots[i] = CompletableFuture.completedFuture(null);
+                    continue;
+                }
+                keys[i] = key(meta, id);
+                CompletableFuture<Object> created = new CompletableFuture<>();
+                CompletableFuture<Object> prev = inflight.putIfAbsent(keys[i], created);
+                if (prev == null) {
+                    slots[i] = created;
+                    ownedIdx.add(i);
+                    ownedIds.add(id);
+                } else {
+                    slots[i] = prev;
+                }
             }
+        } catch (Throwable t) {
+            // 注册中途失败：已注册的 owned future 必须完成并移除，
+            // 否则残留的未完成 future 会让这些键的后续读 join 永久挂起
+            for (Integer idx : ownedIdx) {
+                slots[idx].completeExceptionally(t);
+                inflight.remove(keys[idx], slots[idx]);
+            }
+            throw t instanceof RuntimeException re ? re : new CacheKitException(t);
         }
 
         if (!ownedIds.isEmpty()) {
@@ -247,9 +319,29 @@ public class TieredEntityCache {
                         freshByKey.put(String.valueOf(idValue), entity);
                     }
                 }
+                if (strictIds) {
+                    // 结果为空同样判误用：空结果无法证明请求值是主键集合，
+                    // "全部查不到的条件值"若写占位，占位键不会被对应行的 insert 失效命中
+                    Set<String> requestedKeys = new LinkedHashSet<>();
+                    for (Object id : ownedIds) {
+                        requestedKeys.add(String.valueOf(id));
+                    }
+                    boolean allMatched = !fresh.isEmpty();
+                    for (Object entity : fresh) {
+                        Object idValue = meta.idOf(entity);
+                        if (idValue == null || !requestedKeys.contains(String.valueOf(idValue))) {
+                            allMatched = false;
+                            break;
+                        }
+                    }
+                    if (!allMatched) {
+                        throw new IdMisfireException(meta.entityType(), fresh);
+                    }
+                }
                 for (int i = 0; i < ownedIds.size(); i++) {
                     Object id = ownedIds.get(i);
                     Object entity = freshByKey.get(String.valueOf(id));
+                    Object payload;
                     if (entity != null) {
                         String json = null;
                         try {
@@ -258,17 +350,21 @@ public class TieredEntityCache {
                             log.warn("缓存值序列化失败，本次结果不缓存: {}", meta.entityType().getName(), e);
                         }
                         if (json != null) {
-                            putBoth(key(meta, id), json, effectiveTtl(meta, ttlOverride), props.getL1().getTtl());
+                            putBoth(keys[ownedIdx.get(i)], json, effectiveTtl(meta, ttlOverride),
+                                    l1TtlFor(effectiveBase(meta, ttlOverride)));
+                            payload = json;
+                        } else {
+                            payload = entity;
                         }
-                        slots[ownedIdx.get(i)].complete(entity);
                     } else {
                         if (cacheNull) {
-                            putBoth(key(meta, id), JsonCodec.NULL_SENTINEL,
-                                    props.getL2().getNullTtl(), props.getL2().getNullTtl());
+                            Duration nullTtl = props.getL2().getNullTtl();
+                            putBoth(keys[ownedIdx.get(i)], JsonCodec.NULL_SENTINEL, nullTtl, l1TtlFor(nullTtl));
                             metrics.nullPlaceholder();
                         }
-                        slots[ownedIdx.get(i)].complete(null);
+                        payload = cacheNull ? JsonCodec.NULL_SENTINEL : null;
                     }
+                    slots[ownedIdx.get(i)].complete(payload);
                 }
             } catch (Throwable t) {
                 for (Integer idx : ownedIdx) {
@@ -277,7 +373,7 @@ public class TieredEntityCache {
             } finally {
                 // 必须清理：残留的已完成 future 会让后续读永远 join 到旧值（失效失效）
                 for (int i = 0; i < ownedIds.size(); i++) {
-                    inflight.remove(key(meta, ownedIds.get(i)), slots[ownedIdx.get(i)]);
+                    inflight.remove(keys[ownedIdx.get(i)], slots[ownedIdx.get(i)]);
                 }
             }
         }
@@ -285,7 +381,7 @@ public class TieredEntityCache {
         Object[] out = new Object[n];
         for (int i = 0; i < n; i++) {
             try {
-                out[i] = slots[i].join();
+                out[i] = materialize(meta, keys[i], slots[i].join());
             } catch (CompletionException e) {
                 Throwable cause = e.getCause() != null ? e.getCause() : e;
                 throw cause instanceof RuntimeException re ? re : new CacheKitException(cause);
@@ -296,21 +392,54 @@ public class TieredEntityCache {
 
     /**
      * 批量失效：逐键立即删除 + 广播；延迟双删整个批次只调度一次任务（合并，防行事件风暴）。
-     *
-     * @param withDoubleDelete  false 时跳过延迟双删（用于调用方自行合并非逐行双删的场景）
+     * 键先去重：binlog UPDATE 的 before/after 双镜像主键相同、调用方传重复 ID 时，DEL/广播命令数减半。
      */
-    public void evictBatch(EntityMetadata meta, Iterable<Object> ids, boolean withDoubleDelete) {
-        List<String> keys = new ArrayList<>();
+    public void evictBatch(EntityMetadata meta, Iterable<Object> ids) {
+        Set<String> keys = new LinkedHashSet<>();
         for (Object id : ids) {
             if (id != null) {
                 keys.add(key(meta, id));
             }
         }
-        for (String key : keys) {
-            evictOnce(key);
+        evictKeys(keys, 0);
+        if (doubleDeleteScheduler != null && !keys.isEmpty()) {
+            doubleDeleteScheduler.schedule(() -> evictKeys(keys, 0));
         }
-        if (withDoubleDelete && doubleDeleteScheduler != null && !keys.isEmpty()) {
-            doubleDeleteScheduler.schedule(() -> keys.forEach(this::evictOnce));
+    }
+
+    /** L2 删除失败的重试上限：复用双删调度器的延迟重试，超过后由 L2 TTL 上界兜底 */
+    private static final int MAX_L2_EVICT_RETRIES = 3;
+
+    /**
+     * 一批键的完整删除：L2 批量 DEL（通道支持时单命令/管道）→ 逐键 L1 → 广播。
+     * L2 删除失败（Redis 闪断）时旧值可能滞留 L2：按双删延迟调度重试（P2 兜底——
+     * 否则 Redis 恢复后读会命中删除前写入的旧值且无广播），超过次数上限由 L2 TTL 兜底。
+     */
+    private void evictKeys(Set<String> keys, int attempt) {
+        if (keys.isEmpty()) {
+            return;
+        }
+        boolean l2Deleted = true;
+        if (l2 != null) {
+            try {
+                l2Deleted = l2.evictAll(keys);
+            } catch (Exception e) {
+                warnL2Failure("evictAll", e);
+                l2Deleted = false;
+            }
+        }
+        for (String key : keys) {
+            try {
+                l1.evict(key);
+                metrics.evict(1);
+            } catch (Exception e) {
+                log.warn("缓存失效执行异常，key={}", key, e);
+            }
+        }
+        publisher.publishAll(keys);
+        keys.forEach(k -> metrics.broadcastSent());
+        if (!l2Deleted && doubleDeleteScheduler != null && attempt < MAX_L2_EVICT_RETRIES) {
+            doubleDeleteScheduler.schedule(() -> evictKeys(keys, attempt + 1));
         }
     }
 
@@ -318,18 +447,23 @@ public class TieredEntityCache {
      * 不触发回源的缓存窥探：供批量查询做"命中/已缓存空/未命中"三态拆分。
      */
     public CachePeek peek(EntityMetadata meta, Object id) {
+        if (id == null) {
+            return new CachePeek(CachePeek.State.MISS, null);
+        }
         String key = key(meta, id);
         CacheEntry c1 = l1.get(key);
+        metrics.l1Lookup(c1.hit());
         if (c1.hit()) {
             return toPeek(decode(key, c1.json(), meta));
         }
         if (l2 != null) {
             CacheEntry c2 = l2Get(key);
+            metrics.l2Lookup(c2.hit());
             if (c2.hit()) {
                 Object v = decode(key, c2.json(), meta);
                 if (v != DECODE_FAILED) {
                     if (v != NULL_VALUE) {
-                        l1.put(key, c2.json(), props.getL1().getTtl());
+                        l1.put(key, c2.json(), l1TtlFor(effectiveBase(meta, null)));
                     }
                     return toPeek(v);
                 }
@@ -365,14 +499,6 @@ public class TieredEntityCache {
         }
     }
 
-    private void l2Evict(String key) {
-        try {
-            l2.evict(key);
-        } catch (Exception e) {
-            warnL2Failure("evict", e);
-        }
-    }
-
     private volatile long lastL2WarnAt;
 
     private void warnL2Failure(String op, Exception e) {
@@ -380,6 +506,17 @@ public class TieredEntityCache {
         if (now - lastL2WarnAt > 30_000_000_000L) {
             lastL2WarnAt = now;
             log.warn("L2 通道 {} 失败，降级为不可用（本告警 30s 内不重复）: {}", op, e.getMessage());
+        }
+    }
+
+    private volatile long lastKeyCustomizerWarnAt;
+
+    private void warnKeyCustomizerFailure(CacheKeyCustomizer customizer, Exception e) {
+        long now = System.nanoTime();
+        if (now - lastKeyCustomizerWarnAt > 30_000_000_000L) {
+            lastKeyCustomizerWarnAt = now;
+            log.warn("CacheKeyCustomizer.segment() 抛出异常，本次键组装按无自定义段处理（本告警 30s 内不重复）: {}",
+                    customizer.getClass().getName(), e);
         }
     }
 
@@ -393,18 +530,6 @@ public class TieredEntityCache {
         return new CachePeek(CachePeek.State.HIT, decoded);
     }
 
-    /** 批量流程写回单个命中实体（序列化失败只跳过缓存，不抛出） */
-    public void cachePut(EntityMetadata meta, Object id, Object value, Duration ttlOverride) {
-        String json;
-        try {
-            json = JsonCodec.write(value);
-        } catch (Exception e) {
-            log.warn("缓存值序列化失败，跳过缓存: {}", meta.entityType().getName(), e);
-            return;
-        }
-        putBoth(key(meta, id), json, effectiveTtl(meta, ttlOverride), props.getL1().getTtl());
-    }
-
     /**
      * 批量三态窥探：L1 逐键（本地内存），L2 缺失部分走 {@link CacheChannel#multiGet}（MGET 管道）。
      * 结果顺序与入参 ids 一一对应。
@@ -414,6 +539,11 @@ public class TieredEntityCache {
         List<String> missKeys = new ArrayList<>();
         List<Integer> missIdx = new ArrayList<>();
         for (Object id : ids) {
+            if (id == null) {
+                // null 主键：不触碰缓存键（防 "前缀:null" 键），按未命中占位保持顺序对齐
+                out.add(new CachePeek(CachePeek.State.MISS, null));
+                continue;
+            }
             String key = key(meta, id);
             CacheEntry c1 = l1.get(key);
             metrics.l1Lookup(c1.hit());
@@ -428,12 +558,10 @@ public class TieredEntityCache {
         if (!missKeys.isEmpty() && l2 != null) {
             Map<String, CacheEntry> l2res = l2MultiGet(missKeys);
             if (l2res == null) {
-                // 通道不支持批量：逐键 get（同样降级语义）
+                // 通道不支持批量：逐键 get（同样降级语义；计数由下方主循环统一做，避免重复）
                 l2res = new LinkedHashMap<>();
                 for (String key : missKeys) {
-                    CacheEntry entry = l2Get(key);
-                    metrics.l2Lookup(entry.hit());
-                    l2res.put(key, entry);
+                    l2res.put(key, l2Get(key));
                 }
             }
             for (int i = 0; i < missIdx.size(); i++) {
@@ -446,7 +574,7 @@ public class TieredEntityCache {
                 CachePeek p = toPeek(decode(key, entry.json(), meta));
                 if (p.state() != CachePeek.State.MISS) {
                     if (p.state() == CachePeek.State.HIT) {
-                        l1.put(key, entry.json(), props.getL1().getTtl());
+                        l1.put(key, entry.json(), l1TtlFor(effectiveBase(meta, null)));
                     }
                     out.set(missIdx.get(i), p);
                 }
@@ -455,26 +583,24 @@ public class TieredEntityCache {
         return out;
     }
 
-    /** 批量流程写回"已缓存空"占位（防穿透） */
-    public void cacheNull(EntityMetadata meta, Object id) {
-        putBoth(key(meta, id), JsonCodec.NULL_SENTINEL, props.getL2().getNullTtl(), props.getL2().getNullTtl());
+    /** L2 TTL 基准（抖动前）：方法级覆盖 &gt; 实体级 &gt; 全局 */
+    private Duration effectiveBase(EntityMetadata meta, Duration override) {
+        return override != null ? override
+                : (meta.ttl() != null ? meta.ttl() : props.getL2().getTtl());
     }
 
-    /** 单次完整删除：本地 L1 + L2 + 广播 */
-    private void evictOnce(String key) {
-        try {
-            // 顺序关键：先删 L2 再删 L1——若反过来，间隙内并发读会 L1 miss 后从 L2
-            // 读到旧值并回填 L1，制造可复现的脏数据；L2 先删则该回填路径不存在
-            if (l2 != null) {
-                l2Evict(key);
-            }
-            l1.evict(key);
-            publisher.publish(key);
-            metrics.broadcastSent();
-            metrics.evict(1);
-        } catch (Exception e) {
-            log.warn("缓存失效执行异常，key={}", key, e);
+    /**
+     * L1 TTL：全局 l1.ttl 与"该键生效的 L2 基准 TTL"取较小值。实体级/方法级 TTL 覆盖只作用于
+     * L2，若覆盖值小于 l1.ttl 会出现"L2 已过期、L1 仍供旧值"的倒装——L1 必须始终是更短的脏读上界。
+     * 任一侧为非正值时保持 l1 原值（非正 TTL 的统一语义是"该级跳过写入/禁用"，见 CacheKitProperties）。
+     */
+    private Duration l1TtlFor(Duration l2Base) {
+        Duration l1 = props.getL1().getTtl();
+        if (l1 == null || l1.isZero() || l1.isNegative()
+                || l2Base == null || l2Base.isZero() || l2Base.isNegative()) {
+            return l1;
         }
+        return l1.compareTo(l2Base) <= 0 ? l1 : l2Base;
     }
 
     private void putBoth(String key, String json, Duration l2Ttl, Duration l1Ttl) {
@@ -484,10 +610,12 @@ public class TieredEntityCache {
         l1.put(key, json, l1Ttl);
     }
 
-    /** 实际写入 L2 的 TTL：方法级覆盖 &gt; 实体级 &gt; 全局，再叠加随机抖动 */
+    /** 实际写入 L2 的 TTL：基准 + 随机抖动（防雪崩）；基准非正（禁用 L2 写入）时不抖动，保持语义为"跳过写入" */
     private Duration effectiveTtl(EntityMetadata meta, Duration override) {
-        Duration base = override != null ? override
-                : (meta.ttl() != null ? meta.ttl() : props.getL2().getTtl());
+        Duration base = effectiveBase(meta, override);
+        if (base == null || base.isZero() || base.isNegative()) {
+            return base;
+        }
         Duration jitter = props.getL2().getJitter();
         if (jitter == null || jitter.isZero() || jitter.isNegative()) {
             return base;
@@ -497,8 +625,12 @@ public class TieredEntityCache {
     }
 
     /**
-     * 解码 JSON：null 占位 → {@link #NULL_VALUE}；解析失败（实体结构漂移）→ 失效该键并
-     * 返回 {@link #DECODE_FAILED}，调用方继续走下一级。
+     * 解码 JSON：null 占位 → {@link #NULL_VALUE}；解析失败（实体结构漂移）→ 返回
+     * {@link #DECODE_FAILED}，调用方按未命中继续走下一级。
+     *
+     * <p>失败时不主动失效该键：随后的回源成功会 putBoth 覆盖坏值；回源失败则坏键
+     * 残留但每次读同样按未命中处理，行为与"DB 挂"一致。逐次 DEL+广播只会放大命令量，
+     * 并发读同一坏键时会形成失效风暴（旧实现的问题）。</p>
      */
     private Object decode(String key, String json, EntityMetadata meta) {
         if (JsonCodec.NULL_SENTINEL.equals(json)) {
@@ -506,8 +638,7 @@ public class TieredEntityCache {
         }
         Object value = JsonCodec.read(json, meta.entityType());
         if (value == null) {
-            log.warn("缓存值反序列化失败，已失效该键（实体结构可能已变更）: {}", key);
-            evictOnce(key);
+            log.warn("缓存值反序列化失败，按未命中继续（实体结构可能已变更，回源成功后自动覆盖）: {}", key);
             return DECODE_FAILED;
         }
         return value;

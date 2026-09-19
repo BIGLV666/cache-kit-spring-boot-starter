@@ -26,7 +26,8 @@ import java.util.concurrent.ConcurrentHashMap;
 /**
  * MyBatis-Plus BaseMapper 自动缓存切面：内置方法名单内的查询/写入零注解接入。
  *
- * <p>名单：selectById / updateById / deleteById（selectBatchIds 返回列表，属 P2，不缓存）。
+ * <p>名单：selectById / selectBatchIds（per-ID 三级缓存）/ updateById / deleteById /
+ * deleteByIds（失效）/ insert（清除 null 占位）。
  * 仅拦截声明于 BaseMapper 的方法——用户在子接口覆写的同名方法需自行加注解，避免双重处理。
  * 实体类型从 mapper 接口的 BaseMapper&lt;E&gt; 泛型解析。
  */
@@ -38,10 +39,11 @@ public class MybatisPlusAutoCacheAspect {
     private static final String SELECT_BY_ID = "selectById";
     private static final String UPDATE_BY_ID = "updateById";
     private static final String DELETE_BY_ID = "deleteById";
+    private static final String DELETE_BY_IDS = "deleteByIds";
     private static final String SELECT_BATCH_IDS = "selectBatchIds";
     private static final String INSERT = "insert";
     private static final Set<String> AUTO_METHODS =
-            Set.of(SELECT_BY_ID, UPDATE_BY_ID, DELETE_BY_ID, SELECT_BATCH_IDS, INSERT);
+            Set.of(SELECT_BY_ID, UPDATE_BY_ID, DELETE_BY_ID, DELETE_BY_IDS, SELECT_BATCH_IDS, INSERT);
 
     private final TieredEntityCache tieredCache;
     private final EntityMetadataRegistry registry;
@@ -91,6 +93,17 @@ public class MybatisPlusAutoCacheAspect {
                 if (id != null) {
                     // 事务感知失效：与 @CacheInvalidate 同一钩子（afterCommit 或立即）
                     invalidationDelegate.evictSmart(meta, id);
+                }
+                return result;
+            }
+            case DELETE_BY_IDS -> {
+                Object result = pjp.proceed();
+                // 按主键批量删：逐键精确失效（同一事务感知钩子，整批合并调度延迟双删）
+                if (args[0] instanceof Collection<?> requested) {
+                    List<Object> ids = scalarsOf(requested);
+                    if (!ids.isEmpty()) {
+                        invalidationDelegate.evictSmartBatch(meta, ids);
+                    }
                 }
                 return result;
             }

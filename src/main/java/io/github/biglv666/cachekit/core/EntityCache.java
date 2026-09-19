@@ -19,6 +19,12 @@ public interface EntityCache<T> {
      */
     T get(Object id, Supplier<T> dbLoader);
 
-    /** 失效指定主键的缓存（本地 L1 + Redis L2 + 广播 + 延迟双删） */
+    /**
+     * 失效指定主键的缓存（本地 L1 + Redis L2 + 广播 + 延迟双删）。
+     *
+     * <p>事务感知：活动事务内延迟到 afterCommit 执行（{@code cache-kit.tx.evict-after-commit}
+     * 默认开），事务回滚不失效。注意：同事务内先写后读同键会读到缓存里的提交前旧值，
+     * 需要同事务立即可见时用 {@code CacheKit.withDb} 旁路读取。</p>
+     */
     void evict(Object id);
 }

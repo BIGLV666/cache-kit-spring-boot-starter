@@ -47,6 +47,10 @@ public class BinlogInvalidationListener implements BinaryLogClient.EventListener
     private final Map<Long, TableMapEventData> tableMap = new ConcurrentHashMap<>();
     /** 表 → 主键列序号（1 起算），惰性解析 */
     private final Map<String, Integer> pkOrdinals = new ConcurrentHashMap<>();
+    /** 表 → 主键列解析失败时刻：DB 抖动时避免每个行事件都重查 information_schema */
+    private final Map<String, Long> pkLookupFailedAt = new ConcurrentHashMap<>();
+    private static final long PK_LOOKUP_COOLDOWN_NS = 30_000_000_000L;
+    private volatile long lastPkLookupWarnAt;
 
     public BinlogInvalidationListener(TieredEntityCache tieredCache,
                                       EntityMetadataRegistry registry,
@@ -78,12 +82,14 @@ public class BinlogInvalidationListener implements BinaryLogClient.EventListener
                                 ((DeleteRowsEventData) event.getData()).getRows());
                 case UPDATE_ROWS, EXT_UPDATE_ROWS -> {
                     UpdateRowsEventData data = (UpdateRowsEventData) event.getData();
-                    // UPDATE 取 after 值的主键（主键本身被改时旧键已无效，取新键失效是安全选择）
-                    List<Serializable[]> afterRows = new ArrayList<>(data.getRows().size());
+                    // UPDATE 的 before/after 两幅镜像主键都要失效：主键本身被改时，
+                    // 旧主键的缓存条目仍指向已迁移的旧行，只失效 after 会漏清旧键（幽灵行）
+                    List<Serializable[]> bothImages = new ArrayList<>(data.getRows().size() * 2);
                     for (Map.Entry<Serializable[], Serializable[]> row : data.getRows()) {
-                        afterRows.add(row.getValue());
+                        bothImages.add(row.getKey());
+                        bothImages.add(row.getValue());
                     }
-                    evictRows(data.getTableId(), afterRows);
+                    evictRows(data.getTableId(), bothImages);
                 }
                 default -> {
                     // 忽略其他事件
@@ -116,8 +122,11 @@ public class BinlogInvalidationListener implements BinaryLogClient.EventListener
             return;
         }
         List<Object> ids = new ArrayList<>(rows.size());
+        int rowsWithoutPk = 0;
         for (Serializable[] row : rows) {
             if (ordinal > row.length) {
+                // 行镜像里没有主键列（binlog_row_image=MINIMAL 时 UPDATE/DELETE 的镜像可能缺列）
+                rowsWithoutPk++;
                 continue;
             }
             Object id = toCacheId(row[ordinal - 1]);
@@ -125,13 +134,33 @@ public class BinlogInvalidationListener implements BinaryLogClient.EventListener
                 ids.add(id);
             }
         }
+        if (rowsWithoutPk > 0) {
+            warnRowImageLimited(tm.getTable(), rowsWithoutPk);
+        }
         if (!ids.isEmpty()) {
-            tieredCache.evictBatch(meta, ids, true);
+            tieredCache.evictBatch(meta, ids);
         }
     }
 
-    /** 主键列序号（1 起算）惰性查询 information_schema，按表缓存 */
+    private volatile long lastRowImageWarnAt;
+
+    /** binlog_row_image=MINIMAL 会导致按行失效静默丢失，必须显式告警（30s 限频） */
+    private void warnRowImageLimited(String table, int rowsWithoutPk) {
+        long now = System.nanoTime();
+        if (now - lastRowImageWarnAt > 30_000_000_000L) {
+            lastRowImageWarnAt = now;
+            log.warn("表 {} 有 {} 行事件不含主键列（binlog_row_image 疑似 MINIMAL），"
+                            + "这些行的缓存失效将丢失。请设置 binlog_row_image=FULL",
+                    table, rowsWithoutPk);
+        }
+    }
+
+    /** 主键列序号（1 起算）惰性查询 information_schema，按表缓存；查询失败进入 30s 冷却（冷却期内该表失效跳过，TTL 兜底） */
     private Integer pkOrdinal(String table) {
+        Long failedAt = pkLookupFailedAt.get(table);
+        if (failedAt != null && System.nanoTime() - failedAt < PK_LOOKUP_COOLDOWN_NS) {
+            return null;
+        }
         return pkOrdinals.computeIfAbsent(table, t -> {
             if (dataSource == null) {
                 log.warn("未配置 DataSource，无法解析表 {} 的主键列，该表 binlog 失效被跳过", t);
@@ -144,9 +173,17 @@ public class BinlogInvalidationListener implements BinaryLogClient.EventListener
                 ps.setString(1, database);
                 ps.setString(2, t);
                 try (ResultSet rs = ps.executeQuery()) {
-                    return rs.next() ? rs.getInt(1) : -1;
+                    int ordinal = rs.next() ? rs.getInt(1) : -1;
+                    pkLookupFailedAt.remove(t);
+                    return ordinal;
                 }
             } catch (Exception e) {
+                pkLookupFailedAt.put(t, System.nanoTime());
+                long now = System.nanoTime();
+                if (now - lastPkLookupWarnAt > 30_000_000_000L) {
+                    lastPkLookupWarnAt = now;
+                    log.warn("查询表 {} 主键列失败，该表 binlog 失效进入 30s 冷却（TTL 兜底）", t, e);
+                }
                 throw new CacheKitException("查询表 " + t + " 主键列失败", e);
             }
         });

@@ -1,5 +1,6 @@
 package io.github.biglv666.cachekit.core;
 
+import io.github.biglv666.cachekit.exception.IdMisfireException;
 import io.github.biglv666.cachekit.metadata.EntityMetadata;
 
 import java.time.Duration;
@@ -17,10 +18,12 @@ import java.util.function.Function;
  *
  * <p>算法：逐 ID 三态窥探（命中值 / 已缓存空 / 未命中）→ 未命中集合回调 dbBatchLoader
  * 只查缺失部分 → 命中的"已缓存空"按 IN 语义从结果中消失 → 按请求顺序组装。
- * null 占位复用单条查询机制（短 TTL，防穿透，过期后自动再探）。</p>
+ * null 占位复用单条查询机制（短 TTL，防穿透，过期后自动再探）。
+ * 逐 ID single-flight 由 {@link TieredEntityCache#loadBatch} 保证：并发批量请求重叠的
+ * 缺失 ID 只回源一次，单条/批量共用同一张 inflight 表。</p>
  *
- * <p>已知限制：两个并发批量请求对相同缺失 ID 会各自回源一次（批内无法逐键 single-flight，
- * 回源本身是一条 IN 语句，风暴有界）。</p>
+ * <p>{@code strictIds} 严格模式（注解列表查询路径开启）：回源结果主键与请求值对不上时
+ * 判定请求集合不是主键集合，抛 {@link IdMisfireException} 由调用方旁路，绝不缓存错键。</p>
  */
 public final class BatchCacheResolver {
 
@@ -41,6 +44,20 @@ public final class BatchCacheResolver {
                                        boolean cacheNull,
                                        Duration ttlOverride,
                                        Function<List<Object>, List<Object>> dbBatchLoader) {
+        return resolve(cache, meta, requestedIds, cacheNull, ttlOverride, dbBatchLoader, false);
+    }
+
+    /**
+     * @param strictIds 严格模式守卫：true 时回源结果主键与请求值对不上会抛
+     *                  {@link IdMisfireException}（注解列表查询开启；MP selectBatchIds 路径传 false）
+     */
+    public static List<Object> resolve(TieredEntityCache cache,
+                                       EntityMetadata meta,
+                                       Collection<?> requestedIds,
+                                       boolean cacheNull,
+                                       Duration ttlOverride,
+                                       Function<List<Object>, List<Object>> dbBatchLoader,
+                                       boolean strictIds) {
         if (BypassContext.isActive()) {
             return dbBatchLoader.apply(new ArrayList<>(new LinkedHashSet<>(requestedIds)));
         }
@@ -74,7 +91,7 @@ public final class BatchCacheResolver {
 
         if (!missing.isEmpty()) {
             // 逐 ID single-flight 归批回源：并发批量请求重叠的缺失 ID 只回源一次
-            Object[] loaded = cache.loadBatch(meta, missing, cacheNull, ttlOverride, dbBatchLoader);
+            Object[] loaded = cache.loadBatch(meta, missing, cacheNull, ttlOverride, dbBatchLoader, strictIds);
             for (int i = 0; i < missing.size(); i++) {
                 Object entity = loaded[i];
                 if (entity != null) {

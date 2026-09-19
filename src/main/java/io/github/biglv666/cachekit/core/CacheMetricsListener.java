@@ -15,7 +15,7 @@ public interface CacheMetricsListener {
     default void l2Lookup(boolean hit) {
     }
 
-    /** 一次 DB 回源（批量按批计） */
+    /** 一次 DB 回源（批量按 ID 数计） */
     default void dbLoad(int ids) {
     }
 

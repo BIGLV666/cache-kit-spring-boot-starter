@@ -49,17 +49,11 @@ public class InvalidationSubscriber implements MessageListener {
         if (key == null || key.isBlank()) {
             return;
         }
-        // 命名空间段校验（CacheKeyCustomizer 段不校验：其他实例/租户的键在本地不存在，删除是无害空操作）
-        String rest = key;
-        if (!namespace.isBlank()) {
-            if (!rest.startsWith(namespace + ":")) {
-                log.debug("收到其他命名空间的广播，忽略: {}", key);
-                return;
-            }
-            rest = rest.substring(namespace.length() + 1);
-        }
-        int idx = rest.lastIndexOf(':');
-        if (idx <= 0 || registry.findByPrefix(rest.substring(0, idx)) == null) {
+        // 键形如 [customizer段:]namespace:前缀:id，主键段可能含 ':'，不能按冒号切分——
+        // 由注册表按"实体前缀作为完整段 + namespace 紧邻校验"解析，
+        // 与 TieredEntityCache.key() 的组装规则对齐（含 CacheKeyCustomizer 段的键也能匹配）。
+        // customizer 段不校验：其他实例/租户的键在本地不存在，删除是无害空操作。
+        if (registry.findByBroadcastKey(key, namespace) == null) {
             metrics.broadcastReceived(false);
             log.debug("收到无法匹配已知实体的广播，忽略: {}", key);
             return;

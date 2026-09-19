@@ -11,8 +11,18 @@ import java.time.Duration;
 public class CacheKitProperties {
 
     private boolean enabled = true;
-    /** 缓存键全局命名空间：多套环境/主键类型迁移时整体弃用旧键（键形如 ns:表名:主键） */
+    /**
+     * 缓存键全局命名空间。未配置时自动取 spring.application.name；
+     * 多服务共享 Redis 时用于隔离键空间（同名实体会互相命中返回错数据而非未命中），
+     * 也用于主键类型/表名迁移时整体弃用旧键。
+     */
     private String keyNamespace = "";
+    /**
+     * 为 true 时：keyNamespace 与 spring.application.name 均为空则启动失败。
+     * 多服务/多环境共享 Redis 且无命名空间时，同名实体会跨服务/跨环境互相命中返回错数据，
+     * 默认只打警告；对键冲突零容忍的宿主（如测试环境与生产共用 Redis）打开此开关。
+     */
+    private boolean requireKeyNamespace = false;
 
     public String getKeyNamespace() {
         return keyNamespace;
@@ -20,6 +30,14 @@ public class CacheKitProperties {
 
     public void setKeyNamespace(String keyNamespace) {
         this.keyNamespace = keyNamespace;
+    }
+
+    public boolean isRequireKeyNamespace() {
+        return requireKeyNamespace;
+    }
+
+    public void setRequireKeyNamespace(boolean requireKeyNamespace) {
+        this.requireKeyNamespace = requireKeyNamespace;
     }
 
     private final L1 l1 = new L1();
@@ -69,6 +87,11 @@ public class CacheKitProperties {
          * 写方法处于活动事务时，缓存失效延迟到 afterCommit 执行：
          * 消除"删除发生在事务提交前，并发读回填旧值"的窗口。
          * 事务回滚则不失效（数据未变）。
+         *
+         * <p>关闭的代价：失效立即执行，发生在提交前——并发读会在"删除后、提交前"把旧值回填；
+         * 延迟双删按删除时刻 +1s 调度，若事务总耗时超过 double-delete-delay（默认 1s），
+         * 第二次删除也发生在提交前，回填的旧值将存活至 L2 TTL（默认 10 分钟）。
+         * 长事务场景不要关闭此开关。</p>
          */
         private boolean evictAfterCommit = true;
 
@@ -98,8 +121,12 @@ public class CacheKitProperties {
         /** 复制账号（需 REPLICATION SLAVE 权限），缺省用数据源账号 */
         private String username;
         private String password;
-        /** binlog 副本 server-id，集群内必须唯一 */
-        private Integer serverId = 18365;
+        /**
+         * binlog 副本 server-id，同一 MySQL 上必须唯一（与 MySQL 自身及其他副本都不同）。
+         * 缺省自动生成随机值；同一库上部署多个启用 binlog 的实例时建议显式配置以避免
+         * 极小概率的随机冲突（冲突表现为复制连接被 MySQL 反复踢掉）。
+         */
+        private Integer serverId;
 
         public boolean isEnabled() {
             return enabled;
@@ -162,7 +189,11 @@ public class CacheKitProperties {
     public static class L1 {
         /** 最大条目数 */
         private long maxEntries = 65536;
-        /** 权重上限（KB，按序列化后 JSON 长度计）：>0 时启用并取代 maxEntries，防大实体撑爆 L1；0 关闭 */
+        /**
+         * 权重上限（单位：K 字符，按序列化 JSON 的 UTF-16 字符数计，非字节）：>0 时启用并取代
+         * maxEntries，防大实体撑爆 L1；0 关闭。注意中文等 BMP 字符的 JVM 内存占用约为该值的 2 倍，
+         * 实际内存上限 ≈ maxWeightKb × 2KB。
+         */
         private long maxWeightKb = 0;
 
         public long getMaxWeightKb() {
@@ -194,11 +225,16 @@ public class CacheKitProperties {
 
     /** L2 远程缓存配置 */
     public static class L2 {
-        /** L2 TTL 基准值（命中抖动前的基准） */
+        /**
+         * L2 TTL 基准值（命中抖动前的基准）。
+         * 非正值（0/负数）的统一语义是"该键跳过 L2 写入"（等效禁用 L2），不是"永不过期"——
+         * 组件的脏数据安全模型建立在 TTL 上界之上，不提供无 TTL 写入。
+         * 配置为非正值时启动会打警告。
+         */
         private Duration ttl = Duration.ofMinutes(10);
-        /** 追加在 TTL 上的随机抖动上限，0 表示关闭（防雪崩） */
+        /** 追加在 TTL 上的随机抖动上限，0 表示关闭（防雪崩）；基准 TTL 非正时不叠加抖动 */
         private Duration jitter = Duration.ofSeconds(60);
-        /** null 结果（防穿透占位）的 TTL */
+        /** null 结果（防穿透占位）的 TTL；非正值表示不缓存 null 占位（关闭穿透防护） */
         private Duration nullTtl = Duration.ofSeconds(30);
         /** 延迟双删的延迟时长 */
         private Duration doubleDeleteDelay = Duration.ofSeconds(1);
@@ -262,7 +298,13 @@ public class CacheKitProperties {
 
     /** MyBatis-Plus 适配配置 */
     public static class Mp {
-        /** BaseMapper 内置方法（selectById/updateById/deleteById/selectBatchIds）是否自动接入缓存 */
+        /**
+         * MP 自动缓存总开关，同时控制两个切面：
+         * ① BaseMapper 内置方法（selectById/selectBatchIds/updateById/deleteById/deleteByIds/insert）；
+         * ② IService 批量写（saveBatch/updateBatchById/saveOrUpdateBatch——这些方法在 MP 内部
+         * 经 SqlSession 批量语句执行、绕过 mapper 代理，必须独立切面才能失效）。
+         * 条件写 update(Wrapper)/delete(Wrapper) 不在覆盖范围（不带主键值），靠 binlog/TTL 兜底。
+         */
         private boolean autoCacheBaseMethods = true;
 
         public boolean isAutoCacheBaseMethods() {

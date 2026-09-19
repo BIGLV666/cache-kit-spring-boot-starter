@@ -13,7 +13,7 @@
 
     <groupId>io.github.biglv666</groupId>
     <artifactId>cache-kit-spring-boot-starter</artifactId>
-    <version>0.2.0</version>
+    <version>0.3.0</version>
     <name>cache-kit-spring-boot-starter</name>
     <description>实体元数据驱动的三级缓存组件：Caffeine → Redis → DB read-through，MyBatis-Plus 接入零注解，秒级最终一致</description>
     <url>https://github.com/BIGLV666/cache-kit-spring-boot-starter</url>
@@ -80,12 +80,13 @@
             <artifactId>micrometer-core</artifactId>
             <optional>true</optional>
         </dependency>
-        <!-- binlog 直连失效：随包传递（零传递依赖），cache-kit.binlog.enabled=true 时启用，
+        <!-- binlog 直连失效：optional（类路径存在且 binlog.enabled=true 时才启用，与 L2/MP 同模式），
              直连 MySQL replica 协议，无需部署 Canal Server -->
         <dependency>
             <groupId>com.zendesk</groupId>
             <artifactId>mysql-binlog-connector-java</artifactId>
             <version>${mysql-binlog-connector.version}</version>
+            <optional>true</optional>
         </dependency>
 
         <dependency>

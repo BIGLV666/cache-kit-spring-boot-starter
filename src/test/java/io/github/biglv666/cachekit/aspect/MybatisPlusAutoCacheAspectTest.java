@@ -64,6 +64,15 @@ class MybatisPlusAutoCacheAspectTest {
                         db.put(entity.getUserId(), entity);
                         return 1;
                     }
+                    if ("deleteByIds".equals(method.getName())) {
+                        int removed = 0;
+                        for (Object id : (Collection<?>) args[0]) {
+                            if (db.remove(((Number) id).longValue()) != null) {
+                                removed++;
+                            }
+                        }
+                        return removed;
+                    }
                     if ("insert".equals(method.getName())) {
                         MpUserEntity entity = (MpUserEntity) args[0];
                         db.put(entity.getUserId(), entity);
@@ -180,6 +189,19 @@ class MybatisPlusAutoCacheAspectTest {
         assertThat(proxy.insert(new MpUserEntity(2L, "newcomer"))).isEqualTo(1);
         assertThat(proxy.selectBatchIds(List.of(1L, 2L))).hasSize(2);
         assertThat(dbHits.get()).as("占位失效后缺失部分回源一次").isEqualTo(2);
+    }
+
+    @Test
+    void deleteByIdsShouldEvictBatchMembers() {
+        // MP 3.5.7+ 的 BaseMapper.deleteByIds 必须在拦截名单内，否则按 ID 批量删缓存脏到 TTL
+        assertThat(proxy.selectBatchIds(List.of(1L, 2L))).hasSize(1);
+        assertThat(dbHits.get()).isEqualTo(1);
+
+        // db 中只有 id=1（2 是 null 占位）
+        assertThat(proxy.deleteByIds(List.of(1L))).isEqualTo(1);
+
+        assertThat(proxy.selectBatchIds(List.of(1L))).isEmpty();
+        assertThat(dbHits.get()).as("批删失效后缺失部分回源一次").isEqualTo(2);
     }
 
     @Test

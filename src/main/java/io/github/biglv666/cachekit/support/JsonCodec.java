@@ -17,6 +17,9 @@ public final class JsonCodec {
 
     private static final ObjectMapper MAPPER = new ObjectMapper()
             .configure(DeserializationFeature.FAIL_ON_UNKNOWN_PROPERTIES, false)
+            // Object/Map 字段的整数统一反序列化为 Long：否则小数值写缓存时是 Long、读回变 Integer，
+            // 用户侧 (Long) map.get(...) 仅在缓存命中路径抛 ClassCastException（DB 直查不复现，极难排查）
+            .enable(DeserializationFeature.USE_LONG_FOR_INTS)
             // java.time 等模块由宿主类路径注册（Boot 应用自带 jsr310）；日期序列化为 ISO-8601 字符串
             .disable(com.fasterxml.jackson.databind.SerializationFeature.WRITE_DATES_AS_TIMESTAMPS)
             .findAndRegisterModules();

@@ -7,6 +7,9 @@ import io.github.biglv666.cachekit.metadata.EntityMetadataRegistry;
 import java.lang.annotation.Annotation;
 import java.lang.reflect.Method;
 import java.lang.reflect.Parameter;
+import java.util.ArrayList;
+import java.util.Collection;
+import java.util.List;
 
 /**
  * 主键推导（严格模式）：只接受语义上可证明是"这一行主键"的参数，其余返回 null
@@ -50,6 +53,41 @@ public class PrimaryKeyResolver {
             }
         }
         return null;
+    }
+
+    /**
+     * 从方法参数收集全部主键值（批量失效用）：实体实例（含集合参数的元素）读其主键字段，
+     * 标量参数且参数名与主键字段同名时取值。集合里的标量元素不收——无法证明是主键
+     *（如 List&lt;Long&gt; 可能是任意条件值），保持"绝不猜测"的严格语义。
+     */
+    public List<Object> resolveAll(Method method, Object[] args, EntityMetadata meta) {
+        List<Object> ids = new ArrayList<>();
+        String idFieldName = meta.idField().getName();
+        Parameter[] params = method.getParameters();
+        for (int i = 0; i < args.length; i++) {
+            Object arg = args[i];
+            if (arg == null) {
+                continue;
+            }
+            if (meta.entityType().isInstance(arg)) {
+                Object id = meta.idOf(arg);
+                if (id != null) {
+                    ids.add(id);
+                }
+            } else if (arg instanceof Collection<?> coll) {
+                for (Object element : coll) {
+                    if (element != null && meta.entityType().isInstance(element)) {
+                        Object id = meta.idOf(element);
+                        if (id != null) {
+                            ids.add(id);
+                        }
+                    }
+                }
+            } else if (i < params.length && isScalar(arg) && paramName(params[i]).equals(idFieldName)) {
+                ids.add(arg);
+            }
+        }
+        return ids;
     }
 
     /** 参数名：MyBatis @Param 值优先（反射读取避免硬依赖），其次 Java 参数名 */

@@ -14,6 +14,7 @@ import java.util.concurrent.TimeUnit;
  * 延迟双删调度器：首次删除后按配置延迟再执行一次完整删除。
  *
  * <p>第二次删除幂等，覆盖"读线程查到旧值、写线程删除后、读线程回填脏值"的回填竞态。
+ * 双线程执行（任务相互独立且幂等），持续高写入积压时第二删延迟不会无限拉长；
  * 使用守护线程池，随容器销毁关闭。
  */
 public class DoubleDeleteScheduler {
@@ -23,9 +24,11 @@ public class DoubleDeleteScheduler {
     /** 待执行任务上限：持续高写入下的积压保护，超限跳过（脏数据由 TTL 上界兜底） */
     private static final int MAX_PENDING = 10_000;
 
+    private static final AtomicInteger THREAD_SEQ = new AtomicInteger();
+
     private final ScheduledExecutorService executor =
-            Executors.newSingleThreadScheduledExecutor(r -> {
-                Thread t = new Thread(r, "cache-kit-double-delete");
+            Executors.newScheduledThreadPool(2, r -> {
+                Thread t = new Thread(r, "cache-kit-double-delete-" + THREAD_SEQ.getAndIncrement());
                 t.setDaemon(true);
                 return t;
             });

@@ -41,11 +41,6 @@ public final class EntityMetadata {
         return ttl;
     }
 
-    /** 缓存键：形如 {@code user:123} */
-    public String keyOf(Object id) {
-        return prefix + ":" + id;
-    }
-
     /** 从实体实例读取主键值 */
     public Object idOf(Object entity) {
         try {

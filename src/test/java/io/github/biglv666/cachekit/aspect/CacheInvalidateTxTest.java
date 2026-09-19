@@ -96,6 +96,46 @@ class CacheInvalidateTxTest {
     }
 
     @Test
+    void syncWithoutActualTransactionShouldEvictImmediately() {
+        // 仅同步器、无真实事务（手工 initSynchronization、部分消息监听容器宿主）：
+        // afterCommit 永远不会触发，必须立即失效而不是注册上去被静默吞掉
+        TransactionSynchronizationManager.initSynchronization();
+        try {
+            aspect(true).evictSmart(meta, 1L);
+            assertThat(cache.peek(meta, 1L).state())
+                    .as("无真实事务时必须立即失效")
+                    .isEqualTo(TieredEntityCache.CachePeek.State.MISS);
+        } finally {
+            if (TransactionSynchronizationManager.isSynchronizationActive()) {
+                TransactionSynchronizationManager.clearSynchronization();
+            }
+        }
+    }
+
+    @Test
+    void handleEvictShouldAlsoBeTransactionAware() {
+        // 手动句柄（@CacheHandle 注入的 EntityCache）与注解路径共用事务感知钩子
+        TransactionSynchronizationManager.setActualTransactionActive(true);
+        TransactionSynchronizationManager.initSynchronization();
+        try {
+            io.github.biglv666.cachekit.core.EntityCache<UserEntity> handle =
+                    new io.github.biglv666.cachekit.handle.DelegatingEntityCache<>(
+                            UserEntity.class, new EntityMetadataRegistry(), cache, aspect(true));
+            handle.evict(1L);
+            assertThat(cache.peek(meta, 1L).state())
+                    .as("事务内句柄失效同样延迟到 afterCommit")
+                    .isEqualTo(TieredEntityCache.CachePeek.State.HIT);
+            for (TransactionSynchronization sync : TransactionSynchronizationManager.getSynchronizations()) {
+                sync.afterCommit();
+            }
+            assertThat(cache.peek(meta, 1L).state()).isEqualTo(TieredEntityCache.CachePeek.State.MISS);
+        } finally {
+            TransactionSynchronizationManager.clearSynchronization();
+            TransactionSynchronizationManager.setActualTransactionActive(false);
+        }
+    }
+
+    @Test
     void disabledConfigShouldEvictImmediatelyEvenInTx() {
         TransactionSynchronizationManager.setActualTransactionActive(true);
         TransactionSynchronizationManager.initSynchronization();

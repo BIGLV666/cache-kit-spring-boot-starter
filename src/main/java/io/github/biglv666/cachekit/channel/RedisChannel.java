@@ -5,6 +5,7 @@ import org.slf4j.LoggerFactory;
 import org.springframework.data.redis.core.StringRedisTemplate;
 
 import java.time.Duration;
+import java.util.Collection;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
@@ -68,6 +69,33 @@ public class RedisChannel implements CacheChannel {
             template.delete(key);
         } catch (Exception e) {
             warnDown("evict", e);
+        }
+    }
+
+    @Override
+    public boolean evictReliably(String key) {
+        try {
+            template.delete(key);
+            return true;
+        } catch (Exception e) {
+            warnDown("evict", e);
+            return false;
+        }
+    }
+
+    @Override
+    public boolean evictAll(Collection<String> keys) {
+        if (keys.isEmpty()) {
+            return true;
+        }
+        try {
+            // StringRedisTemplate.delete(Collection) 汇成单条 DEL 多键命令，
+            // 替代逐键 DEL（binlog 大事务的行事件风暴场景命令数从 N 降到 1）
+            template.delete(keys);
+            return true;
+        } catch (Exception e) {
+            warnDown("evictAll", e);
+            return false;
         }
     }
 

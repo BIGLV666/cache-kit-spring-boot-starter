@@ -16,10 +16,14 @@ final class TransactionAwareEvictor {
     }
 
     /**
-     * @param evictAction 失效动作；活动事务内注册到 afterCommit，否则立即执行
+     * @param evictAction 失效动作；真实活动事务内注册到 afterCommit，否则立即执行
      */
     static void evict(Runnable evictAction) {
-        if (TransactionSynchronizationManager.isSynchronizationActive()
+        // 判据必须是"真实事务激活 + 同步器激活"两者兼备：仅有同步器而无真实事务时
+        //（手工 initSynchronization、部分消息监听容器宿主）afterCommit 永远不会触发，
+        // 注册上去的失效会被静默吞掉——此时必须立即执行
+        if (TransactionSynchronizationManager.isActualTransactionActive()
+                && TransactionSynchronizationManager.isSynchronizationActive()
                 && !TransactionSynchronizationManager.isCurrentTransactionReadOnly()) {
             TransactionSynchronizationManager.registerSynchronization(new TransactionSynchronization() {
                 @Override

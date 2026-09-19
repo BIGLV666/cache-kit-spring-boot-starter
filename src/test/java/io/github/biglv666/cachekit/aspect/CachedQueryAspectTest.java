@@ -42,6 +42,10 @@ class CachedQueryAspectTest {
         @CachedQuery
         List<UserEntity> selectByUserIds(Collection<Long> userIds);
 
+        /** 非主键集合参数（手机号）：严格守卫必须旁路，不得返回空列表、不得写 user:<phone> 占位 */
+        @CachedQuery
+        List<UserEntity> selectByPhones(Collection<String> phones);
+
         /** condition 恒为 false：始终直查 DB */
         @CachedQuery(condition = "false")
         UserEntity selectWithoutCache(Long userId);
@@ -82,6 +86,13 @@ class CachedQueryAspectTest {
                         dbHits.incrementAndGet();
                         Collection<Long> ids = (Collection<Long>) args[0];
                         yield ids.stream().filter(db::containsKey).map(db::get).collect(java.util.stream.Collectors.toList());
+                    }
+                    case "selectByPhones" -> {
+                        dbHits.incrementAndGet();
+                        Collection<String> phones = (Collection<String>) args[0];
+                        yield db.values().stream()
+                                .filter(u -> phones.contains(u.getUserName()))
+                                .collect(java.util.stream.Collectors.toList());
                     }
                     case "updateUserName" -> {
                         UserEntity user = db.get(((Number) args[0]).longValue());
@@ -171,6 +182,20 @@ class CachedQueryAspectTest {
         proxy.updateUserName(1L);
         assertThat(proxy.selectByUserIds(java.util.List.of(1L))).hasSize(1);
         assertThat(dbHits.get()).isEqualTo(2);
+    }
+
+    @Test
+    void nonIdCollectionQueryMustBypassAndReturnData() {
+        // P0 回归钉子：手机号集合不是主键——修复前会把请求值当 ID 拆解，
+        // 查到正确数据后因键不匹配全部丢弃返回空列表，并写 user:<手机号> 占位（永不失效）
+        db.put(1L, new UserEntity(1L, "13800001111"));
+
+        List<UserEntity> first = proxy.selectByPhones(List.of("13800001111"));
+        assertThat(first).as("必须原样返回查到的数据，不得因键不匹配丢弃").hasSize(1);
+
+        List<UserEntity> second = proxy.selectByPhones(List.of("13800001111"));
+        assertThat(second).hasSize(1);
+        assertThat(dbHits.get()).as("非主键集合恒回 DB（旁路不缓存）").isEqualTo(2);
     }
 
     @Test

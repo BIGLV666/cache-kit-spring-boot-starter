@@ -5,6 +5,7 @@ import io.github.biglv666.cachekit.core.BatchCacheResolver;
 import io.github.biglv666.cachekit.core.BypassContext;
 import io.github.biglv666.cachekit.core.TieredEntityCache;
 import io.github.biglv666.cachekit.exception.CacheKitException;
+import io.github.biglv666.cachekit.exception.IdMisfireException;
 import io.github.biglv666.cachekit.metadata.EntityMetadata;
 import io.github.biglv666.cachekit.metadata.EntityMetadataRegistry;
 import org.aspectj.lang.ProceedingJoinPoint;
@@ -32,8 +33,10 @@ import java.util.concurrent.ConcurrentHashMap;
 /**
  * {@code @CachedQuery} 切面：L1 → L2 → 方法体（查 DB）三级 read-through。
  *
- * <p>返回类型没有缓存元数据（如 List、DTO）时打一次警告后直查 DB，不抛错——
- * MVP 只支持 by-ID 实体查询，列表缓存是 P2。
+ * <p>单值返回：主键严格推导（实体实例参数 / 标量参数名=主键字段名），推导不出则警告 + 直查 DB。
+ * List&lt;实体&gt; 返回：唯一集合参数按 ID 拆解（selectBatchIds 语义），并开启严格模式守卫——
+ * 回源结果主键与请求值对不上（集合参数实为条件值，如手机号列表）时判定误用，
+ * 警告 + 直查 DB 不缓存，绝不把条件值当主键回填占位。其余返回类型打一次警告后直查 DB。</p>
  */
 @Aspect
 public class CachedQueryAspect {
@@ -48,6 +51,7 @@ public class CachedQueryAspect {
     private final ParameterNameDiscoverer parameterNameDiscoverer = new DefaultParameterNameDiscoverer();
     private final Map<String, Expression> conditionCache = new ConcurrentHashMap<>();
     private final Set<Method> unsupportedWarned = ConcurrentHashMap.newKeySet();
+    private final Set<Method> misfireWarned = ConcurrentHashMap.newKeySet();
 
     public CachedQueryAspect(TieredEntityCache tieredCache, EntityMetadataRegistry registry) {
         this.tieredCache = tieredCache;
@@ -125,12 +129,27 @@ public class CachedQueryAspect {
         if (!conditionHolds(cachedQuery.condition(), method, args)) {
             return pjp.proceed();
         }
-        return BatchCacheResolver.resolve(tieredCache, meta, ids, cachedQuery.cacheNull(), ttl,
-                missing -> {
-                    Object[] replaced = args.clone();
-                    replaced[idx] = missing;
-                    return invokeList(pjp, replaced);
-                });
+        // 预窥探（无回源副作用）：记录是否存在已缓存命中，供误判旁路时选择正确的返回方式
+        boolean anyCachedHit = tieredCache.peekBatch(meta, ids).stream()
+                .anyMatch(p -> p.state() != TieredEntityCache.CachePeek.State.MISS);
+        try {
+            return BatchCacheResolver.resolve(tieredCache, meta, ids, cachedQuery.cacheNull(), ttl,
+                    missing -> {
+                        Object[] replaced = args.clone();
+                        replaced[idx] = missing;
+                        return invokeList(pjp, replaced);
+                    }, true);
+        } catch (IdMisfireException e) {
+            // 严格模式守卫：集合参数不是主键集合（回源结果主键与请求值对不上）。
+            // 该路径必然旁路缓存、不写任何占位——与单值路径"猜测式推导被拒绝"同源语义
+            if (misfireWarned.add(method)) {
+                log.warn("@CachedQuery 集合参数不是主键集合（回源结果主键与请求值不匹配），"
+                        + "该方法将直查 DB 不缓存，请确认参数确为主键集合: {}", method);
+            }
+            // 无缓存命中：回源子集（去重后）即完整结果，直接返回不重查；
+            // 有缓存命中（部分请求值恰为已缓存主键）：用原始参数重查保证结果完整
+            return anyCachedHit ? invokeList(pjp, args) : e.getLoadedEntities();
+        }
     }
 
     @SuppressWarnings("unchecked")

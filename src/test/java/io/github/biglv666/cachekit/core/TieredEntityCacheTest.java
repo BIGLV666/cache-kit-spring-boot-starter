@@ -2,6 +2,8 @@ package io.github.biglv666.cachekit.core;
 
 import io.github.biglv666.cachekit.channel.CacheChannel;
 import io.github.biglv666.cachekit.config.CacheKitProperties;
+import io.github.biglv666.cachekit.exception.CacheKitException;
+import io.github.biglv666.cachekit.exception.IdMisfireException;
 import io.github.biglv666.cachekit.metadata.EntityMetadata;
 import io.github.biglv666.cachekit.metadata.EntityMetadataRegistry;
 import io.github.biglv666.cachekit.model.UserEntity;
@@ -22,6 +24,7 @@ import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 class TieredEntityCacheTest {
 
@@ -302,11 +305,186 @@ class TieredEntityCacheTest {
         cache.load(meta, 1L, null, true, () -> new UserEntity(1L, "a"));
         cache.load(meta, 2L, null, true, () -> new UserEntity(2L, "b"));
 
-        cache.evictBatch(meta, List.of(1L, 2L), true);
+        cache.evictBatch(meta, List.of(1L, 2L));
 
         assertThat(l1.store).doesNotContainKey("user_entity:1");
         assertThat(l1.store).doesNotContainKey("user_entity:2");
         assertThat(publisher.published).contains("user_entity:1", "user_entity:2");
+    }
+
+    @Test
+    void batchEvictThenLoadMustReloadAfterBatch() {
+        // 回归钉子：批量回源完成后 inflight future 必须清理——
+        // 残留的已完成 future 会让 evict 后的 load 永远拿到旧值（历史真实缺陷，现有并发测试抓不住）
+        AtomicInteger loadCount = new AtomicInteger();
+        java.util.function.Function<List<Object>, List<Object>> loader = missing -> {
+            loadCount.incrementAndGet();
+            return missing.stream()
+                    .map(id -> new UserEntity((Long) id, "v" + id))
+                    .<Object>map(x -> x)
+                    .toList();
+        };
+
+        cache.loadBatch(meta, List.of(1L), true, null, loader);
+        cache.evictBatch(meta, List.of(1L));
+        cache.loadBatch(meta, List.of(1L), true, null, loader);
+
+        assertThat(loadCount.get()).as("evict 后批量读必须重新回源").isEqualTo(2);
+    }
+
+    @Test
+    void strictBatchShouldRejectNonPrimaryKeyValues() {
+        // 严格模式守卫：请求值与回源结果主键对不上（把手机号当 ID）→
+        // 抛 IdMisfireException 携带原始结果，绝不返回空数据、不写错键占位
+        java.util.function.Function<List<Object>, List<Object>> loader = missing ->
+                List.<Object>of(new UserEntity(7L, "owner"));
+
+        assertThatThrownBy(() -> cache.loadBatch(meta, List.of("13800001111"), true, null, loader, true))
+                .isInstanceOf(IdMisfireException.class)
+                .satisfies(e -> assertThat(((IdMisfireException) e).getLoadedEntities())
+                        .containsExactly(new UserEntity(7L, "owner")));
+
+        assertThat(l1.store).doesNotContainKey("user_entity:13800001111");
+        assertThat(l2.store).doesNotContainKey("user_entity:13800001111");
+    }
+
+    @Test
+    void strictBatchShouldRejectWhenResultIsEmpty() {
+        // 严格守卫扩展到空结果（0.3.0）：请求值全部查不到时同样无法证明是主键集合，
+        // 抛误判旁路而不是写错键 null 占位——占位键永远不会被该行后续 insert 的失效命中
+        java.util.function.Function<List<Object>, List<Object>> loader = missing -> List.of();
+
+        assertThatThrownBy(() -> cache.loadBatch(meta, List.of("13800001111"), true, null, loader, true))
+                .isInstanceOf(IdMisfireException.class);
+
+        assertThat(l1.store).doesNotContainKey("user_entity:13800001111");
+        assertThat(l2.store).doesNotContainKey("user_entity:13800001111");
+    }
+
+    @Test
+    void strictBatchShouldPassWhenValuesArePrimaryKeys() {
+        java.util.function.Function<List<Object>, List<Object>> loader = missing ->
+                missing.stream()
+                        .map(id -> new UserEntity((Long) id, "v" + id))
+                        .<Object>map(x -> x)
+                        .toList();
+
+        Object[] out = cache.loadBatch(meta, List.of(1L, 2L), true, null, loader, true);
+
+        assertThat(out[0]).isEqualTo(new UserEntity(1L, "v1"));
+        assertThat(out[1]).isEqualTo(new UserEntity(2L, "v2"));
+        assertThat(l1.store).containsKey("user_entity:1");
+        assertThat(l1.store).containsKey("user_entity:2");
+    }
+
+    @Test
+    void customizerThrowingShouldNotBreakChain() {
+        // CacheKeyCustomizer.segment() 抛异常：按"无段"降级，单条/批量/失效主流程全部照常
+        //（历史上批量注册路径会被 SPI 异常打断并永久挂死后续读）
+        CacheKitProperties props = new CacheKitProperties();
+        props.getL2().setJitter(Duration.ZERO);
+        InMemoryChannel l1c = new InMemoryChannel();
+        TieredEntityCache guarded = new TieredEntityCache(props, l1c, new InMemoryChannel(),
+                new NoopInvalidationPublisher(), new DoubleDeleteScheduler(Duration.ofMillis(50)),
+                "", List.<CacheKeyCustomizer>of(() -> {
+                    throw new IllegalStateException("no tenant ctx");
+                }));
+        EntityMetadata m = new EntityMetadataRegistry().require(UserEntity.class);
+
+        Object v = guarded.load(m, 1L, null, true, () -> new UserEntity(1L, "lv"));
+        assertThat(v).isEqualTo(new UserEntity(1L, "lv"));
+        assertThat(l1c.store).containsKey("user_entity:1");
+
+        Object[] batch = guarded.loadBatch(m, List.of(2L, 3L), true, null,
+                missing -> missing.stream()
+                        .map(id -> new UserEntity((Long) id, "b"))
+                        .<Object>map(x -> x)
+                        .toList());
+        assertThat(batch).hasSize(2);
+
+        guarded.evictBatch(m, List.of(2L));
+        AtomicInteger reload = new AtomicInteger();
+        guarded.loadBatch(m, List.of(2L), true, null, missing -> {
+            reload.incrementAndGet();
+            return List.of(new UserEntity(2L, "b2"));
+        });
+        assertThat(reload.get()).as("失效后必须重新回源（inflight 不残留）").isEqualTo(1);
+    }
+
+    @Test
+    void waitersShouldGetDistinctInstances() throws Exception {
+        // single-flight 等待者必须各自 decode 出新实例，不能共享同一可变对象
+        int threads = 8;
+        ExecutorService pool = Executors.newFixedThreadPool(threads);
+        CountDownLatch start = new CountDownLatch(threads);
+        List<CompletableFuture<Object>> futures = new CopyOnWriteArrayList<>();
+        for (int i = 0; i < threads; i++) {
+            futures.add(CompletableFuture.supplyAsync(() -> {
+                start.countDown();
+                try {
+                    start.await(5, TimeUnit.SECONDS);
+                } catch (InterruptedException ignored) {
+                }
+                return cache.load(meta, 9L, null, true, () -> {
+                    try {
+                        Thread.sleep(100);
+                    } catch (InterruptedException ignored) {
+                    }
+                    return new UserEntity(9L, "shared");
+                });
+            }, pool));
+        }
+        start.await(5, TimeUnit.SECONDS);
+        CompletableFuture.allOf(futures.toArray(new CompletableFuture[0])).get(10, TimeUnit.SECONDS);
+        pool.shutdownNow();
+
+        java.util.Set<Object> identities = java.util.Collections.newSetFromMap(new java.util.IdentityHashMap<>());
+        for (CompletableFuture<Object> f : futures) {
+            identities.add(f.join());
+        }
+        assertThat(identities).as("并发等待者应拿到各自独立实例").hasSize(threads);
+    }
+
+    @Test
+    void l1TtlShouldNotExceedEntityTtlOverride() {
+        // 实体级 ttl=2s < 全局 l1.ttl=30s：L1 回填 TTL 必须取较小值，防止"L2 已过期、L1 仍旧"倒装
+        CacheKitProperties props = new CacheKitProperties();
+        props.getL2().setJitter(Duration.ZERO);
+        Map<String, Duration> l1Ttls = new ConcurrentHashMap<>();
+        CacheChannel recordingL1 = new InMemoryChannel() {
+            @Override
+            public void put(String key, String json, Duration ttl) {
+                super.put(key, json, ttl);
+                l1Ttls.put(key, ttl);
+            }
+        };
+        TieredEntityCache ttlCache = new TieredEntityCache(props, recordingL1, new InMemoryChannel(),
+                new NoopInvalidationPublisher(), new DoubleDeleteScheduler(Duration.ofMillis(50)));
+        EntityMetadata ttlMeta = new EntityMetadataRegistry().require(
+                io.github.biglv666.cachekit.model.TtlEntity.class);
+
+        ttlCache.load(ttlMeta, 1L, null, true, () -> new io.github.biglv666.cachekit.model.TtlEntity(1L, "lv"));
+
+        assertThat(l1Ttls.get("ttl_entity:1")).isEqualTo(Duration.ofSeconds(2));
+    }
+
+    @Test
+    void nullIdShouldNotTouchCache() {
+        // null 主键防 "前缀:null" 键与字面 "null" 主键冲突：load 拒绝、peek/batch 按未命中
+        assertThatThrownBy(() -> cache.load(meta, null, null, true, () -> new UserEntity(1L, "x")))
+                .isInstanceOf(CacheKitException.class);
+        assertThat(cache.peek(meta, null).state()).isEqualTo(TieredEntityCache.CachePeek.State.MISS);
+        assertThat(cache.peekBatch(meta, java.util.Arrays.asList(1L, null)).get(1).state())
+                .isEqualTo(TieredEntityCache.CachePeek.State.MISS);
+
+        Object[] out = cache.loadBatch(meta, java.util.Arrays.asList(1L, null), true, null,
+                missing -> missing.stream()
+                        .map(id -> new UserEntity((Long) id, "v"))
+                        .<Object>map(x -> x)
+                        .toList());
+        assertThat(out[0]).isNotNull();
+        assertThat(out[1]).isNull();
+        assertThat(l1.store).doesNotContainKey("user_entity:null");
     }
 
     @Test
@@ -383,5 +561,64 @@ class TieredEntityCacheTest {
             Thread.sleep(ms);
         } catch (InterruptedException ignored) {
         }
+    }
+
+    @Test
+    void evictBatchShouldDeduplicateKeys() {
+        // binlog UPDATE 双镜像主键相同 / 调用方传重复 ID：DEL + 广播去重，命令数减半；
+        // 双删调度器传 null，避免第二次删除干扰计数
+        TieredEntityCache noDoubleDelete = new TieredEntityCache(new CacheKitProperties(), l1, l2,
+                publisher, null);
+
+        noDoubleDelete.evictBatch(meta, List.of(1L, 1L, 2L));
+
+        assertThat(publisher.published.stream().filter("user_entity:1"::equals).count())
+                .as("重复 ID 只广播一次").isEqualTo(1);
+        assertThat(publisher.published.stream().filter("user_entity:2"::equals).count()).isEqualTo(1);
+    }
+
+    @Test
+    void l2EvictFailureShouldBeRetried() throws Exception {
+        // DEL 恰好落在 Redis 闪断窗口内 → 旧值滞留 L2：失效路径必须按双删延迟自动重试
+        AtomicInteger evictAttempts = new AtomicInteger();
+        CacheChannel flakyL2 = new InMemoryChannel() {
+            @Override
+            public boolean evictAll(java.util.Collection<String> keys) {
+                evictAttempts.incrementAndGet();
+                throw new IllegalStateException("redis down");
+            }
+        };
+        TieredEntityCache flaky = new TieredEntityCache(new CacheKitProperties(), l1, flakyL2,
+                new NoopInvalidationPublisher(), new DoubleDeleteScheduler(Duration.ofMillis(50)));
+
+        flaky.evictBatch(meta, List.of(1L));
+
+        long deadline = System.currentTimeMillis() + 2000;
+        while (evictAttempts.get() < 2 && System.currentTimeMillis() < deadline) {
+            Thread.sleep(10);
+        }
+        assertThat(evictAttempts.get())
+                .as("L2 删除失败必须重试（初始 1 次 + 至少 1 次重试）")
+                .isGreaterThanOrEqualTo(2);
+    }
+
+    @Test
+    void decodeFailureShouldNotEvictButReloadOverwrites() {
+        // 结构漂移坏值：按未命中回源，回源成功 putBoth 覆盖坏值（0.3.0 起不再逐次 DEL+广播），
+        // 并发读同一坏键不会形成失效风暴
+        l1.store.put("user_entity:1", "{corrupt");
+        l2.store.put("user_entity:1", "{corrupt");
+        AtomicInteger loaderCount = new AtomicInteger();
+
+        Object value = cache.load(meta, 1L, null, true, () -> {
+            loaderCount.incrementAndGet();
+            return new UserEntity(1L, "lv");
+        });
+
+        assertThat(value).isEqualTo(new UserEntity(1L, "lv"));
+        assertThat(loaderCount.get()).isEqualTo(1);
+        assertThat(l1.store.get("user_entity:1")).contains("userName");
+        assertThat(l2.store.get("user_entity:1")).contains("userName");
+        assertThat(publisher.published).as("坏值由回源覆盖，无需广播失效").isEmpty();
     }
 }
