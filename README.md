@@ -1,5 +1,7 @@
 # cache-kit-spring-boot-starter
 
+[![Maven Central](https://img.shields.io/maven-central/v/io.github.biglv666/cache-kit-spring-boot-starter)](https://central.sonatype.com/artifact/io.github.biglv666/cache-kit-spring-boot-starter) [![CI](https://github.com/BIGLV666/cache-kit-spring-boot-starter/actions/workflows/ci.yml/badge.svg)](https://github.com/BIGLV666/cache-kit-spring-boot-starter/actions/workflows/ci.yml)
+
 实体元数据驱动的三级缓存组件：**Caffeine（L1）→ Redis（L2）→ DB（loader）** read-through。
 对 MyBatis-Plus 用户**零注解接入**；binlog 直连失效补齐"绕过应用的写"盲区；
 一致性语义为**最终一致**——常态秒级（双删窗口内），最坏受 L2 TTL 上界约束（见"一致性机制"）。
