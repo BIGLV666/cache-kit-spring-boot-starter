@@ -116,7 +116,9 @@ binlog 直连失效模块补上这个盲区：以 MySQL replica 协议直连 bin
 任何来源对已缓存实体表的写入都会按行提取主键并触发失效。
 
 **不需要部署 Canal Server**：类路径引入 `mysql-binlog-connector-java`（本 starter 中声明为 optional，
-仅启用 binlog 的服务需要自行添加该依赖）+ 开启开关即可。MySQL 需开启 `log_bin`、
+仅启用 binlog 的服务需要自行添加该依赖）+ 开启开关即可。**防呆**：`cache-kit.binlog.enabled=true`
+但类路径缺 connector 时启动直接失败并提示补依赖——绝不静默跳过（0.3.1 起）。
+MySQL 需开启 `log_bin`、
 `binlog_format=ROW`、`binlog_row_image=FULL`（MINIMAL 会让行镜像缺主键列，按行失效静默丢失），
 且账号具备 `REPLICATION SLAVE` 权限。
 

@@ -33,6 +33,7 @@ import org.springframework.boot.context.properties.EnableConfigurationProperties
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
 import org.springframework.core.env.Environment;
+import org.springframework.util.ClassUtils;
 import org.springframework.data.redis.connection.RedisConnectionFactory;
 import org.springframework.data.redis.core.StringRedisTemplate;
 import org.springframework.data.redis.listener.ChannelTopic;
@@ -349,6 +350,46 @@ public class CacheKitAutoConfiguration {
                         : type.getSimpleName();
                 return tablePrefix + name;
             };
+        }
+    }
+
+    /**
+     * binlog 防呆：cache-kit.binlog.enabled=true 但类路径缺 binlog connector 时快速失败。
+     *
+     * <p>0.3.0 起 mysql-binlog-connector-java 为 optional 依赖：类缺失时
+     * {@link CacheKitBinlogConfiguration} 的 @ConditionalOnClass 会让整个 binlog 装配
+     * 静默跳过——使用方"以为开了 binlog 失效其实没开"，比报错危险得多（绕过 MP 的写
+     * 只剩 TTL 兜底，脏读窗口不可控）。因此在 connector 缺失时直接拒绝启动，
+     * 并给出明确的依赖补齐指引。</p>
+     */
+    @Configuration(proxyBeanMethods = false)
+    @ConditionalOnProperty(prefix = "cache-kit.binlog", name = "enabled", havingValue = "true")
+    static class CacheKitBinlogConnectorGuard {
+
+        static final String BINLOG_CLIENT_CLASS = "com.github.shyiko.mysql.binlog.BinaryLogClient";
+
+        @Bean
+        Object binlogConnectorPresenceGuard() {
+            assertBinlogConnectorPresent(ClassUtils.isPresent(BINLOG_CLIENT_CLASS,
+                    CacheKitAutoConfiguration.class.getClassLoader()));
+            return new Object();
+        }
+
+        /**
+         * 校验 connector 是否在类路径，缺失即抛异常。
+         *
+         * @param present {@code ClassUtils.isPresent} 的探测结果
+         * @throws IllegalStateException connector 缺失，binlog 失效无法生效
+         */
+        static void assertBinlogConnectorPresent(boolean present) {
+            if (!present) {
+                throw new IllegalStateException(
+                        "cache-kit.binlog.enabled=true 但类路径缺少 binlog connector（"
+                                + BINLOG_CLIENT_CLASS + "）。"
+                                + "0.3.0 起 mysql-binlog-connector-java 为 optional 依赖，请显式添加："
+                                + "com.zendesk:mysql-binlog-connector-java:0.31.0（0.31.0 才兼容 MySQL 8.4）。"
+                                + "若确不需要 binlog 失效，请配置 cache-kit.binlog.enabled=false 显式关闭。");
+            }
         }
     }
 
