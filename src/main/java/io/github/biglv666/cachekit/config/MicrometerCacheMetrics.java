@@ -15,7 +15,12 @@ import io.micrometer.core.instrument.MeterRegistry;
  * cache-kit.null.placeholders —— null 占位写入（穿透防护触发）
  * cache-kit.evict.keys —— 失效键数（含双删第二次）
  * cache-kit.broadcast.sent / cache-kit.broadcast.received{applied=true|false}
- * —— 收发差值可观：sent 持续大于 received 总和说明存在广播丢失（由 L1 TTL 兜底）</p>
+ * —— 收发差值可观：sent 持续大于 received 总和说明存在广播丢失（由 L1 TTL 兜底）
+ * cache-kit.l2.fallbacks{op=get|put|multiGet|evictAll} —— L2 降级次数（Redis 故障按未命中处理）
+ * cache-kit.evict.retries.exhausted —— L2 删除重试耗尽（失效丢失，由 L2 TTL 兜底）
+ * cache-kit.doubledelete.skipped —— 双删积压跳过（脏数据由 TTL 上界兜底）
+ * cache-kit.binlog.position.resets —— binlog 位点重置（断连窗口失效丢失，由 L2 TTL 兜底）
+ * —— 以上四项持续增长说明失效链路存在真实丢失窗口，应告警排查</p>
  */
 class MicrometerCacheMetrics implements CacheMetricsListener {
 
@@ -29,8 +34,15 @@ class MicrometerCacheMetrics implements CacheMetricsListener {
     private final Counter broadcastSent;
     private final Counter broadcastReceivedApplied;
     private final Counter broadcastReceivedSkipped;
+    /** 按 op 惰性注册的降级计数器（op 集合固定为通道操作名，无需预注册） */
+    private final MeterRegistry registryRef;
+    private final java.util.concurrent.ConcurrentHashMap<String, Counter> l2Fallbacks = new java.util.concurrent.ConcurrentHashMap<>();
+    private final Counter evictRetriesExhausted;
+    private final Counter doubleDeleteSkipped;
+    private final Counter binlogPositionResets;
 
     MicrometerCacheMetrics(MeterRegistry registry) {
+        this.registryRef = registry;
         this.l1Hit = registry.counter("cache-kit.l1.requests", "result", "hit");
         this.l1Miss = registry.counter("cache-kit.l1.requests", "result", "miss");
         this.l2Hit = registry.counter("cache-kit.l2.requests", "result", "hit");
@@ -41,6 +53,9 @@ class MicrometerCacheMetrics implements CacheMetricsListener {
         this.broadcastSent = registry.counter("cache-kit.broadcast.sent");
         this.broadcastReceivedApplied = registry.counter("cache-kit.broadcast.received", "applied", "true");
         this.broadcastReceivedSkipped = registry.counter("cache-kit.broadcast.received", "applied", "false");
+        this.evictRetriesExhausted = registry.counter("cache-kit.evict.retries.exhausted");
+        this.doubleDeleteSkipped = registry.counter("cache-kit.doubledelete.skipped");
+        this.binlogPositionResets = registry.counter("cache-kit.binlog.position.resets");
     }
 
     @Override
@@ -76,5 +91,26 @@ class MicrometerCacheMetrics implements CacheMetricsListener {
     @Override
     public void broadcastReceived(boolean applied) {
         (applied ? broadcastReceivedApplied : broadcastReceivedSkipped).increment();
+    }
+
+    @Override
+    public void l2Fallback(String op) {
+        l2Fallbacks.computeIfAbsent(op == null ? "unknown" : op,
+                o -> registryRef.counter("cache-kit.l2.fallbacks", "op", o)).increment();
+    }
+
+    @Override
+    public void evictRetryExhausted() {
+        evictRetriesExhausted.increment();
+    }
+
+    @Override
+    public void doubleDeleteSkipped() {
+        doubleDeleteSkipped.increment();
+    }
+
+    @Override
+    public void binlogPositionReset() {
+        binlogPositionResets.increment();
     }
 }

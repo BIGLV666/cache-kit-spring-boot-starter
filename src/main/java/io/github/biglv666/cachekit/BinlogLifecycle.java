@@ -43,6 +43,9 @@ public class BinlogLifecycle implements SmartLifecycle {
     private final AtomicReference<CountDownLatch> disconnectSignal = new AtomicReference<>(new CountDownLatch(1));
     private volatile boolean running;
     private Thread connector;
+    private volatile io.github.biglv666.cachekit.core.CacheMetricsListener metrics =
+            new io.github.biglv666.cachekit.core.CacheMetricsListener() {
+            };
 
     public BinlogLifecycle(BinaryLogClient client, BinlogInvalidationListener listener, String description) {
         this(client, listener, description, DEFAULT_MAX_RAPID_FAILURE_ROUNDS, 3_000L);
@@ -56,6 +59,12 @@ public class BinlogLifecycle implements SmartLifecycle {
         this.description = description;
         this.maxRapidFailureRounds = maxRapidFailureRounds;
         this.reconnectDelayMillis = reconnectDelayMillis;
+    }
+
+    /** 挂载指标监听器（位点重置埋点：断连窗口内的失效丢失计数） */
+    public void setMetricsListener(io.github.biglv666.cachekit.core.CacheMetricsListener metrics) {
+        this.metrics = metrics == null ? new io.github.biglv666.cachekit.core.CacheMetricsListener() {
+        } : metrics;
     }
 
     @Override
@@ -161,6 +170,7 @@ public class BinlogLifecycle implements SmartLifecycle {
                             + "（binlog 过期/PURGE BINARY LOGS），重置为最新位点继续监听；"
                             + "断连窗口内的事件失效丢失由 L2 TTL 上界兜底",
                     rounds);
+            metrics.binlogPositionReset();
             // filename 置 null 触发 connect() 重新执行 SHOW MASTER STATUS 定位到当前位点
             client.setBinlogFilename(null);
             client.setBinlogPosition(4);

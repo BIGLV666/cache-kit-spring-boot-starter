@@ -36,12 +36,20 @@ public class DoubleDeleteScheduler {
     private final Duration delay;
     private final AtomicInteger pending = new AtomicInteger();
     private volatile long lastWarnAt;
+    private volatile CacheMetricsListener metrics = new CacheMetricsListener() {
+    };
 
     public DoubleDeleteScheduler(Duration delay) {
         if (delay == null || delay.isZero() || delay.isNegative()) {
             throw new CacheKitException("延迟双删的 delay 必须为正数");
         }
         this.delay = delay;
+    }
+
+    /** 挂载指标监听器（积压跳过埋点） */
+    public void setMetricsListener(CacheMetricsListener metrics) {
+        this.metrics = metrics == null ? new CacheMetricsListener() {
+        } : metrics;
     }
 
     /**
@@ -51,6 +59,7 @@ public class DoubleDeleteScheduler {
      */
     public void schedule(Runnable task) {
         if (pending.get() >= MAX_PENDING) {
+            metrics.doubleDeleteSkipped();
             long now = System.nanoTime();
             if (now - lastWarnAt > 30_000_000_000L) {
                 lastWarnAt = now;

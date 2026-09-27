@@ -226,6 +226,8 @@ cache-kit:
 - **修复**：`@CachedQuery` 列表查询误判旁路在并发重叠请求下可能返回他人线程的回源子集（静默缺数据）——统一改为原始参数全参重查；误判时共享 in-flight future 改为按真实数据正常完成，非 strict 路径（MP `selectBatchIds`）的并发等待者不再收到 `IdMisfireException`
 - **增强**：binlog 断线重连位点被服务端清理（binlog 过期/PURGE）时会无限快速重连直至重启——检测到"连上即秒断且无事件"连续 5 轮后自动回退最新位点并告警（断点续传本身由 connector 原生支持）
 - **增强**：L2 装配时检查 Redis 命令超时（>5s 告警），避免 Redis 抖动时业务读线程被阻塞到超时才降级
+- **增强**：失效丢失/降级可观测——新增 `cache-kit.l2.fallbacks{op}`、`cache-kit.evict.retries.exhausted`、
+  `cache-kit.doubledelete.skipped`、`cache-kit.binlog.position.resets` 计数器（重试耗尽与位点重置建议配置告警）
 
 ## 0.3.0 变更
 
@@ -251,6 +253,10 @@ cache-kit:
 | `cache-kit.null.placeholders` | null 占位写入（穿透防护触发） |
 | `cache-kit.evict.keys` | 失效键数（含双删第二次） |
 | `cache-kit.broadcast.sent` / `received{applied=true\|false}` | 广播收发——**sent 持续大于 received 说明存在广播丢失**（L1 TTL 兜底） |
+| `cache-kit.l2.fallbacks{op}` | L2 降级次数（op=get/put/multiGet/evictAll），持续增长说明 Redis 不健康 |
+| `cache-kit.evict.retries.exhausted` | L2 删除重试耗尽——**失效丢失**（旧值滞留 L2 至 TTL），建议告警 |
+| `cache-kit.doubledelete.skipped` | 双删积压跳过（脏数据由 TTL 上界兜底），持续增长说明写入压力超调度能力 |
+| `cache-kit.binlog.position.resets` | binlog 位点重置——**断连窗口内失效丢失**（位点被服务端清理时触发），建议告警 |
 
 ## 稳健性设计
 

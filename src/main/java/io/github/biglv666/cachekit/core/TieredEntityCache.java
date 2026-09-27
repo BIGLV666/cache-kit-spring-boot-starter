@@ -454,8 +454,13 @@ public class TieredEntityCache {
         }
         publisher.publishAll(keys);
         keys.forEach(k -> metrics.broadcastSent());
-        if (!l2Deleted && doubleDeleteScheduler != null && attempt < MAX_L2_EVICT_RETRIES) {
-            doubleDeleteScheduler.schedule(() -> evictKeys(keys, attempt + 1));
+        if (!l2Deleted && doubleDeleteScheduler != null) {
+            if (attempt < MAX_L2_EVICT_RETRIES) {
+                doubleDeleteScheduler.schedule(() -> evictKeys(keys, attempt + 1));
+            } else {
+                // 重试耗尽仍失败：旧值滞留 L2，失效丢失（由 L2 TTL 上界兜底），计入指标供告警
+                metrics.evictRetryExhausted();
+            }
         }
     }
 
@@ -518,6 +523,7 @@ public class TieredEntityCache {
     private volatile long lastL2WarnAt;
 
     private void warnL2Failure(String op, Exception e) {
+        metrics.l2Fallback(op);
         long now = System.nanoTime();
         if (now - lastL2WarnAt > 30_000_000_000L) {
             lastL2WarnAt = now;

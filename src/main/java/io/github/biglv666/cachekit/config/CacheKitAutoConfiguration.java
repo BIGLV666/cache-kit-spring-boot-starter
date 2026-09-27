@@ -113,8 +113,11 @@ public class CacheKitAutoConfiguration {
 
     @Bean(destroyMethod = "shutdown")
     @ConditionalOnMissingBean
-    public DoubleDeleteScheduler cacheKitDoubleDeleteScheduler(CacheKitProperties props) {
-        return new DoubleDeleteScheduler(props.getL2().getDoubleDeleteDelay());
+    public DoubleDeleteScheduler cacheKitDoubleDeleteScheduler(CacheKitProperties props,
+            ObjectProvider<io.github.biglv666.cachekit.core.CacheMetricsListener> metrics) {
+        DoubleDeleteScheduler scheduler = new DoubleDeleteScheduler(props.getL2().getDoubleDeleteDelay());
+        scheduler.setMetricsListener(metrics.getIfAvailable());
+        return scheduler;
     }
 
     @Bean
@@ -405,8 +408,11 @@ public class CacheKitAutoConfiguration {
         }
 
         @Bean
-        public BinlogLifecycle cacheKitBinlogLifecycle(com.github.shyiko.mysql.binlog.BinaryLogClient client) {
-            return new BinlogLifecycle(client, binlogEventListener(client), "cache-kit-binlog");
+        public BinlogLifecycle cacheKitBinlogLifecycle(com.github.shyiko.mysql.binlog.BinaryLogClient client,
+                ObjectProvider<io.github.biglv666.cachekit.core.CacheMetricsListener> metrics) {
+            BinlogLifecycle lifecycle = new BinlogLifecycle(client, binlogEventListener(client), "cache-kit-binlog");
+            lifecycle.setMetricsListener(metrics.getIfAvailable());
+            return lifecycle;
         }
 
         /**

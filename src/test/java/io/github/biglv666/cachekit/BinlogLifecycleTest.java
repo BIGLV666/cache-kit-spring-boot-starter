@@ -55,6 +55,39 @@ class BinlogLifecycleTest {
     }
 
     @Test
+    void positionResetShouldRecordMetric() throws Exception {
+        BinaryLogClient client = Mockito.mock(BinaryLogClient.class);
+        Mockito.when(client.getBinlogFilename()).thenReturn("binlog.000003");
+        AtomicReference<BinaryLogClient.LifecycleListener> lifecycle = new AtomicReference<>();
+        Mockito.doAnswer(invocation -> {
+            lifecycle.set(invocation.getArgument(0));
+            return null;
+        }).when(client).registerLifecycleListener(any());
+        BinlogInvalidationListener listener =
+                new BinlogInvalidationListener(null, new EntityMetadataRegistry(), null, "db");
+
+        java.util.concurrent.atomic.AtomicInteger resets = new java.util.concurrent.atomic.AtomicInteger();
+        BinlogLifecycle lifecycleBean = new BinlogLifecycle(client, listener, "test", 2, 10);
+        lifecycleBean.setMetricsListener(new io.github.biglv666.cachekit.core.CacheMetricsListener() {
+            @Override
+            public void binlogPositionReset() {
+                resets.incrementAndGet();
+            }
+        });
+        lifecycleBean.start();
+        Mockito.verify(client, timeout(2_000)).connect();
+        for (int i = 1; i <= 2; i++) {
+            lifecycle.get().onDisconnect(client);
+            Mockito.verify(client, timeout(2_000).times(i + 1)).connect();
+        }
+
+        Mockito.verify(client, timeout(2_000)).setBinlogFilename(Mockito.isNull());
+        assertThat(resets.get()).as("位点重置应计入 binlog.position.resets").isEqualTo(1);
+
+        lifecycleBean.stop();
+    }
+
+    @Test
     void startShouldRegisterSingleLifecycleListenerAndListenerKeepsCounting() {
         BinaryLogClient client = Mockito.mock(BinaryLogClient.class);
         ArgumentCaptor<BinaryLogClient.LifecycleListener> captor =

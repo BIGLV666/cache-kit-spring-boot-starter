@@ -34,4 +34,20 @@ public interface CacheMetricsListener {
     /** 失效广播接收（applied=false 表示校验未通过被忽略） */
     default void broadcastReceived(boolean applied) {
     }
+
+    /** L2 一次调用降级（op 为通道操作名）：Redis 宕机/抖动时按未命中处理 */
+    default void l2Fallback(String op) {
+    }
+
+    /** L2 删除重试达到上限仍失败：旧值滞留 L2，失效丢失由 L2 TTL 上界兜底 */
+    default void evictRetryExhausted() {
+    }
+
+    /** 延迟双删任务因积压超限被跳过：脏数据由 TTL 上界兜底 */
+    default void doubleDeleteSkipped() {
+    }
+
+    /** binlog 位点被服务端清理后重置为最新位点：断连窗口内的失效丢失 */
+    default void binlogPositionReset() {
+    }
 }

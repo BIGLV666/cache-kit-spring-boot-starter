@@ -1,5 +1,7 @@
 package io.github.biglv666.cachekit.core;
 
+import io.github.biglv666.cachekit.channel.CacheChannel;
+import io.github.biglv666.cachekit.channel.CacheEntry;
 import io.github.biglv666.cachekit.channel.CaffeineChannel;
 import io.github.biglv666.cachekit.config.CacheKitProperties;
 import io.github.biglv666.cachekit.metadata.EntityMetadata;
@@ -111,5 +113,59 @@ class CacheMetricsTest {
 
         assertThat(metrics.dbLoad.get()).as("dbLoad 按 ID 数计").isEqualTo(2);
         assertThat(metrics.nullPlaceholder.get()).isEqualTo(1); // id=2 不存在
+    }
+
+    @Test
+    void l2FailureShouldRecordFallbackAndRetryExhaustion() throws Exception {
+        CacheKitProperties props = new CacheKitProperties();
+        props.getL2().setJitter(Duration.ZERO);
+        java.util.Map<String, Integer> fallbacks = new java.util.concurrent.ConcurrentHashMap<>();
+        java.util.concurrent.atomic.AtomicInteger exhausted = new java.util.concurrent.atomic.AtomicInteger();
+        // L2 通道整体故障：get/put/evict 全部抛异常（模拟 Redis 宕机）
+        CacheChannel broken = new CacheChannel() {
+            @Override
+            public CacheEntry get(String key) {
+                throw new IllegalStateException("redis down");
+            }
+
+            @Override
+            public void put(String key, String json, Duration ttl) {
+                throw new IllegalStateException("redis down");
+            }
+
+            @Override
+            public void evict(String key) {
+                throw new IllegalStateException("redis down");
+            }
+
+            @Override
+            public boolean evictAll(java.util.Collection<String> keys) {
+                throw new IllegalStateException("redis down");
+            }
+        };
+        TieredEntityCache c = new TieredEntityCache(props, new CaffeineChannel(1024), broken,
+                new NoopInvalidationPublisher(), new DoubleDeleteScheduler(Duration.ofMillis(20)));
+        c.setMetricsListener(new CacheMetricsListener() {
+            @Override
+            public void l2Fallback(String op) {
+                fallbacks.merge(op, 1, Integer::sum);
+            }
+
+            @Override
+            public void evictRetryExhausted() {
+                exhausted.incrementAndGet();
+            }
+        });
+
+        c.load(meta, 1L, null, true, () -> new UserEntity(1L, "lv"));
+        c.evict(meta, 1L);
+
+        assertThat(fallbacks.get("get")).as("读降级按次计（不受告警限频影响）").isEqualTo(1);
+        // 重试链：首次 evict + 3 次延迟重试（20ms 间隔），全部失败后计一次耗尽
+        long deadline = System.currentTimeMillis() + 2_000;
+        while (exhausted.get() == 0 && System.currentTimeMillis() < deadline) {
+            Thread.sleep(20);
+        }
+        assertThat(exhausted.get()).as("DEL 重试耗尽应计一次（失效丢失告警依据）").isEqualTo(1);
     }
 }
