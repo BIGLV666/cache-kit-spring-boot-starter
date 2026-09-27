@@ -40,6 +40,7 @@ class MicrometerCacheMetrics implements CacheMetricsListener {
     private final Counter evictRetriesExhausted;
     private final Counter doubleDeleteSkipped;
     private final Counter binlogPositionResets;
+    private final io.micrometer.core.instrument.Timer invalidationDelay;
 
     MicrometerCacheMetrics(MeterRegistry registry) {
         this.registryRef = registry;
@@ -56,6 +57,23 @@ class MicrometerCacheMetrics implements CacheMetricsListener {
         this.evictRetriesExhausted = registry.counter("cache-kit.evict.retries.exhausted");
         this.doubleDeleteSkipped = registry.counter("cache-kit.doubledelete.skipped");
         this.binlogPositionResets = registry.counter("cache-kit.binlog.position.resets");
+        this.invalidationDelay = io.micrometer.core.instrument.Timer
+                .builder("cache-kit.invalidation.delay")
+                .description("binlog 行事件 MySQL 时间戳 → 本实例失效应用（含时钟偏差，趋势观测用）")
+                .publishPercentiles(0.5, 0.99)
+                .register(registry);
+        // 命中率 Gauge：由 counter 值计算，无流量时发布 NaN（Prometheus 端视为无数据）
+        io.micrometer.core.instrument.Gauge.builder("cache-kit.l1.hit.rate", () -> hitRate(l1Hit, l1Miss))
+                .description("L1 命中率（hit / (hit+miss)）")
+                .register(registry);
+        io.micrometer.core.instrument.Gauge.builder("cache-kit.l2.hit.rate", () -> hitRate(l2Hit, l2Miss))
+                .description("L2 命中率（hit / (hit+miss)）")
+                .register(registry);
+    }
+
+    private static double hitRate(Counter hit, Counter miss) {
+        double total = hit.count() + miss.count();
+        return total == 0 ? Double.NaN : hit.count() / total;
     }
 
     @Override
@@ -112,5 +130,13 @@ class MicrometerCacheMetrics implements CacheMetricsListener {
     @Override
     public void binlogPositionReset() {
         binlogPositionResets.increment();
+    }
+
+    @Override
+    public void invalidationDelayMillis(long millis) {
+        // MySQL 与宿主机时钟偏差可能导致负值：Timer 不接受负值，偏差场景直接跳过
+        if (millis >= 0) {
+            invalidationDelay.record(millis, java.util.concurrent.TimeUnit.MILLISECONDS);
+        }
     }
 }

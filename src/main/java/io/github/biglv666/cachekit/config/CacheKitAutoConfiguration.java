@@ -360,7 +360,8 @@ public class CacheKitAutoConfiguration {
                 ObjectProvider<javax.sql.DataSource> dataSourceProvider,
                 EntityMetadataRegistry registry,
                 TieredEntityCache tieredEntityCache,
-                ObjectProvider<io.github.biglv666.cachekit.core.CacheKeyCustomizer> keyCustomizers) {
+                ObjectProvider<io.github.biglv666.cachekit.core.CacheKeyCustomizer> keyCustomizers,
+                ObjectProvider<io.github.biglv666.cachekit.core.CacheMetricsListener> metricsProvider) {
             CacheKitProperties.Binlog binlog = props.getBinlog();
             org.springframework.boot.autoconfigure.jdbc.DataSourceProperties dsProps =
                     dsPropsProvider.getIfAvailable();
@@ -391,6 +392,7 @@ public class CacheKitAutoConfiguration {
 
             BinlogInvalidationListener listener = new BinlogInvalidationListener(
                     tieredEntityCache, registry, dataSourceProvider.getIfAvailable(), database);
+            listener.setMetricsListener(metricsProvider.getIfAvailable());
             com.github.shyiko.mysql.binlog.BinaryLogClient client =
                     new com.github.shyiko.mysql.binlog.BinaryLogClient(host, port, username, password);
             // server-id 缺省自动生成随机值：固定默认值会让同库多副本/多服务互相踢掉复制连接

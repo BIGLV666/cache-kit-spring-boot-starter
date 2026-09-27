@@ -50,4 +50,11 @@ public interface CacheMetricsListener {
     /** binlog 位点被服务端清理后重置为最新位点：断连窗口内的失效丢失 */
     default void binlogPositionReset() {
     }
+
+    /**
+     * 一次 binlog 行事件的失效传播延迟（MySQL 事件时间戳 → 本实例失效应用）。
+     * 受 MySQL 与本机时钟偏差影响，仅作趋势观测。
+     */
+    default void invalidationDelayMillis(long millis) {
+    }
 }

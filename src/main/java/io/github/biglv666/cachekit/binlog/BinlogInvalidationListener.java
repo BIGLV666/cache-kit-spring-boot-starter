@@ -54,6 +54,15 @@ public class BinlogInvalidationListener implements BinaryLogClient.EventListener
     private volatile long lastPkLookupWarnAt;
     /** 已接收事件总数（含非行事件）：供 BinlogLifecycle 判断"连上后是否收到过事件" */
     private final java.util.concurrent.atomic.AtomicLong receivedEvents = new AtomicLong();
+    private volatile io.github.biglv666.cachekit.core.CacheMetricsListener metrics =
+            new io.github.biglv666.cachekit.core.CacheMetricsListener() {
+            };
+
+    /** 挂载指标监听器（失效传播延迟埋点） */
+    public void setMetricsListener(io.github.biglv666.cachekit.core.CacheMetricsListener metrics) {
+        this.metrics = metrics == null ? new io.github.biglv666.cachekit.core.CacheMetricsListener() {
+        } : metrics;
+    }
 
     public BinlogInvalidationListener(TieredEntityCache tieredCache,
                                       EntityMetadataRegistry registry,
@@ -89,10 +98,12 @@ public class BinlogInvalidationListener implements BinaryLogClient.EventListener
             }
             switch (type) {
                 case WRITE_ROWS, EXT_WRITE_ROWS ->
-                        evictRows(((WriteRowsEventData) event.getData()).getTableId(),
+                        evictRows(event.getHeader().getTimestamp(),
+                                ((WriteRowsEventData) event.getData()).getTableId(),
                                 ((WriteRowsEventData) event.getData()).getRows());
                 case DELETE_ROWS, EXT_DELETE_ROWS ->
-                        evictRows(((DeleteRowsEventData) event.getData()).getTableId(),
+                        evictRows(event.getHeader().getTimestamp(),
+                                ((DeleteRowsEventData) event.getData()).getTableId(),
                                 ((DeleteRowsEventData) event.getData()).getRows());
                 case UPDATE_ROWS, EXT_UPDATE_ROWS -> {
                     UpdateRowsEventData data = (UpdateRowsEventData) event.getData();
@@ -103,7 +114,7 @@ public class BinlogInvalidationListener implements BinaryLogClient.EventListener
                         bothImages.add(row.getKey());
                         bothImages.add(row.getValue());
                     }
-                    evictRows(data.getTableId(), bothImages);
+                    evictRows(event.getHeader().getTimestamp(), data.getTableId(), bothImages);
                 }
                 default -> {
                     // 忽略其他事件
@@ -119,7 +130,7 @@ public class BinlogInvalidationListener implements BinaryLogClient.EventListener
      * 整事件合并失效：一个行事件可能包含大量受影响行，逐键立即删除，
      * 延迟双删整个批次只调度一次（避免大事务行事件风暴放大成百万级延迟任务）。
      */
-    private void evictRows(long tableId, List<Serializable[]> rows) {
+    private void evictRows(long eventTimestampSeconds, long tableId, List<Serializable[]> rows) {
         if (rows.isEmpty()) {
             return;
         }
@@ -153,6 +164,8 @@ public class BinlogInvalidationListener implements BinaryLogClient.EventListener
         }
         if (!ids.isEmpty()) {
             tieredCache.evictBatch(meta, ids);
+            // 失效传播延迟（MySQL 事件时间 → 本实例失效应用）：受两侧时钟偏差影响，仅作趋势观测
+            metrics.invalidationDelayMillis(System.currentTimeMillis() - eventTimestampSeconds * 1000L);
         }
     }
 

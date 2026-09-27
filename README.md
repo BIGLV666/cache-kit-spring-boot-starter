@@ -228,6 +228,10 @@ cache-kit:
 - **增强**：L2 装配时检查 Redis 命令超时（>5s 告警），避免 Redis 抖动时业务读线程被阻塞到超时才降级
 - **增强**：失效丢失/降级可观测——新增 `cache-kit.l2.fallbacks{op}`、`cache-kit.evict.retries.exhausted`、
   `cache-kit.doubledelete.skipped`、`cache-kit.binlog.position.resets` 计数器（重试耗尽与位点重置建议配置告警）
+- **增强**：可观测性深化——`cache-kit.l1.hit.rate` / `cache-kit.l2.hit.rate` 命中率 Gauge、
+  `cache-kit.invalidation.delay` 失效传播延迟 Timer（p50/p99，含时钟偏差，趋势观测用）、
+  Grafana 面板模板（`docs/grafana-dashboard.json`）
+- **测试**：Testcontainers 端到端覆盖 binlog 断线重连回放与位点被 PURGE 后自动重置恢复失效
 
 ## 0.3.0 变更
 
@@ -257,6 +261,11 @@ cache-kit:
 | `cache-kit.evict.retries.exhausted` | L2 删除重试耗尽——**失效丢失**（旧值滞留 L2 至 TTL），建议告警 |
 | `cache-kit.doubledelete.skipped` | 双删积压跳过（脏数据由 TTL 上界兜底），持续增长说明写入压力超调度能力 |
 | `cache-kit.binlog.position.resets` | binlog 位点重置——**断连窗口内失效丢失**（位点被服务端清理时触发），建议告警 |
+| `cache-kit.l1.hit.rate` / `cache-kit.l2.hit.rate` | 命中率 Gauge（hit/(hit+miss)，由计数器实时计算） |
+| `cache-kit.invalidation.delay`（Timer，p50/p99） | binlog 行事件 MySQL 时间戳 → 本实例失效应用的传播延迟；**含两侧时钟偏差，趋势观测用** |
+
+Grafana 面板模板见 [`docs/grafana-dashboard.json`](docs/grafana-dashboard.json)（导入后选择 Prometheus 数据源即可，
+命中/回源速率、失效丢失告警、L2 降级、失效传播延迟开箱即用）。
 
 ## 稳健性设计
 
