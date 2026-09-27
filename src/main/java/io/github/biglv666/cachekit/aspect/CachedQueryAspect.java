@@ -129,9 +129,6 @@ public class CachedQueryAspect {
         if (!conditionHolds(cachedQuery.condition(), method, args)) {
             return pjp.proceed();
         }
-        // 预窥探（无回源副作用）：记录是否存在已缓存命中，供误判旁路时选择正确的返回方式
-        boolean anyCachedHit = tieredCache.peekBatch(meta, ids).stream()
-                .anyMatch(p -> p.state() != TieredEntityCache.CachePeek.State.MISS);
         try {
             return BatchCacheResolver.resolve(tieredCache, meta, ids, cachedQuery.cacheNull(), ttl,
                     missing -> {
@@ -140,15 +137,15 @@ public class CachedQueryAspect {
                         return invokeList(pjp, replaced);
                     }, true);
         } catch (IdMisfireException e) {
-            // 严格模式守卫：集合参数不是主键集合（回源结果主键与请求值对不上）。
-            // 该路径必然旁路缓存、不写任何占位——与单值路径"猜测式推导被拒绝"同源语义
+            // 严格模式守卫：集合参数不是主键集合（回源结果主键与请求值不匹配）。
+            // 该路径必然旁路缓存、不写任何占位——与单值路径"猜测式推导被拒绝"同源语义。
+            // 统一用原始参数全参重查：回源子集只覆盖本线程赢得 single-flight 的 ID，
+            // 并发重叠请求下直接返回子集会静默缺数据（0.3.1 修复），代价仅是一次误用路径的重查
             if (misfireWarned.add(method)) {
                 log.warn("@CachedQuery 集合参数不是主键集合（回源结果主键与请求值不匹配），"
                         + "该方法将直查 DB 不缓存，请确认参数确为主键集合: {}", method);
             }
-            // 无缓存命中：回源子集（去重后）即完整结果，直接返回不重查；
-            // 有缓存命中（部分请求值恰为已缓存主键）：用原始参数重查保证结果完整
-            return anyCachedHit ? invokeList(pjp, args) : e.getLoadedEntities();
+            return invokeList(pjp, args);
         }
     }
 

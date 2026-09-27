@@ -362,6 +362,84 @@ class TieredEntityCacheTest {
     }
 
     @Test
+    void strictMisfireShouldNotLeakToConcurrentWaiters() throws Exception {
+        // 误判（0.3.1）：strict 调用方的 shared future 必须正常完成——
+        // 非 strict 路径（MP selectBatchIds）join 同一 key 时不得收到 IdMisfireException；
+        // 误判路径不写占位，等待者拿到的语义是"该键无数据"
+        ExecutorService pool = Executors.newFixedThreadPool(2);
+        try {
+            CountDownLatch loaderStarted = new CountDownLatch(1);
+            CountDownLatch waiterReady = new CountDownLatch(1);
+            CountDownLatch release = new CountDownLatch(1);
+            AtomicInteger waiterLoaderCalled = new AtomicInteger();
+            CompletableFuture<Object[]> strict = CompletableFuture.supplyAsync(() -> {
+                try {
+                    cache.loadBatch(meta, List.of("13800001111"), true, null, missing -> {
+                        loaderStarted.countDown();
+                        try {
+                            waiterReady.await();
+                            release.await();
+                        } catch (InterruptedException e) {
+                            Thread.currentThread().interrupt();
+                            throw new RuntimeException(e);
+                        }
+                        return List.<Object>of(new UserEntity(7L, "owner"));
+                    }, true);
+                    throw new AssertionError("strict 调用方应收到 IdMisfireException");
+                } catch (IdMisfireException e) {
+                    return null;
+                }
+            }, pool);
+
+            assertThat(loaderStarted.await(5, TimeUnit.SECONDS)).isTrue();
+
+            CompletableFuture<Object[]> waiter = CompletableFuture.supplyAsync(() -> {
+                waiterReady.countDown();
+                // cacheNull=true 用于验证误判路径不写占位
+                return cache.loadBatch(meta, List.of("13800001111"), true, null,
+                        missing -> {
+                            waiterLoaderCalled.incrementAndGet();
+                            return List.of();
+                        }, false);
+            }, pool);
+            assertThat(waiterReady.await(5, TimeUnit.SECONDS)).isTrue();
+            // 给等待者留出注册/join 时间；strict 的 loader 仍被 release 拦住，future 必然在表内
+            Thread.sleep(100);
+            release.countDown();
+
+            Object[] waiterResult = waiter.get(5, TimeUnit.SECONDS);
+            assertThat(waiterLoaderCalled.get()).as("等待者应 join strict 的 future 而非自行回源").isZero();
+            assertThat(waiterResult[0]).as("非 strict 等待者应得到 null 而非误判异常").isNull();
+            assertThat(l1.store).as("误判路径不写占位").doesNotContainKey("user_entity:13800001111");
+            assertThat(l2.store).as("误判路径不写占位").doesNotContainKey("user_entity:13800001111");
+            assertThat(strict.get(5, TimeUnit.SECONDS)).isNull();
+        } finally {
+            pool.shutdownNow();
+        }
+    }
+
+    @Test
+    void strictMisfireShouldStillCacheRowBackedHits() {
+        // 误判时回源结果里"能对上真实主键"的行照常缓存：键即真实主键，失效链路完整
+        java.util.function.Function<List<Object>, List<Object>> loader = missing -> {
+            // 请求 [7, "13800001111"]：返回行 7（请求内、真实主键）+ 行 9（不在请求内）
+            // → 行 9 对不上 → 整体判误用；行 7 的键仍应照常缓存
+            if (missing.contains(7L)) {
+                return List.<Object>of(new UserEntity(7L, "v7"), new UserEntity(9L, "v9"));
+            }
+            return List.of();
+        };
+
+        assertThatThrownBy(() -> cache.loadBatch(meta, List.of(7L, "13800001111"), true, null, loader, true))
+                .isInstanceOf(IdMisfireException.class);
+
+        assertThat(l1.store).containsKey("user_entity:7");
+        assertThat(l2.store).containsKey("user_entity:7");
+        assertThat(l1.store).doesNotContainKey("user_entity:13800001111");
+        assertThat(l2.store).doesNotContainKey("user_entity:13800001111");
+    }
+
+    @Test
     void strictBatchShouldPassWhenValuesArePrimaryKeys() {
         java.util.function.Function<List<Object>, List<Object>> loader = missing ->
                 missing.stream()

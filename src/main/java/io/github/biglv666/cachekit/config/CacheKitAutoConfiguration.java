@@ -58,8 +58,11 @@ public class CacheKitAutoConfiguration {
     public EntityMetadataRegistry entityMetadataRegistry(CacheKitProperties props,
                                                          Environment environment,
                                                          ObjectProvider<EntityMetadataRegistry.DefaultTableNameResolver> tableNameResolver) {
-        // 启动期 fail-fast：L1 TTL 必须显著小于 L2 TTL，倒挂会造成"L2 已刷新、L1 永远旧"的顽疾
-        if (!props.getL1().getTtl().isZero() && !props.getL1().getTtl().isNegative()
+        // 启动期 fail-fast：L1 TTL 必须显著小于 L2 TTL，倒挂会造成"L2 已刷新、L1 永远旧"的顽疾。
+        // l2.ttl 非正值 = 禁用 L2 写入（见下方告警分支），此时不存在倒装问题，跳过本校验——
+        // 否则任何正值的 l1.ttl 都 >= 非正值，文档承诺的"非正值禁用 L2"配置将无法启动
+        if (!props.getL2().getTtl().isZero() && !props.getL2().getTtl().isNegative()
+                && !props.getL1().getTtl().isZero() && !props.getL1().getTtl().isNegative()
                 && props.getL1().getTtl().compareTo(props.getL2().getTtl()) >= 0) {
             throw new CacheKitException("cache-kit.l1.ttl(" + props.getL1().getTtl()
                     + ") 必须小于 cache-kit.l2.ttl(" + props.getL2().getTtl() + ")："
@@ -172,11 +175,30 @@ public class CacheKitAutoConfiguration {
         public RedisChannel cacheKitL2Channel(ObjectProvider<StringRedisTemplate> templateProvider,
                                               ObjectProvider<RedisConnectionFactory> factoryProvider) {
             StringRedisTemplate template = templateProvider.getIfAvailable();
+            RedisConnectionFactory factory = template != null
+                    ? template.getConnectionFactory()
+                    : factoryProvider.getObject();
             if (template == null) {
-                template = new StringRedisTemplate(factoryProvider.getObject());
+                template = new StringRedisTemplate(factory);
                 template.afterPropertiesSet();
             }
+            warnIfCommandTimeoutLong(factory);
             return new RedisChannel(template);
+        }
+
+        /**
+         * 命令超时检查：L2 降级以"单次 Redis 调用返回异常"为边界——宿主命令超时过长时
+         * （Lettuce 默认 60s），Redis 抖动会先把业务读线程阻塞到超时才降级，
+         * 违背"业务读写绝不因 L2 失败而失败"的降级承诺，故超阈值告警给出修正指引。
+         */
+        private static void warnIfCommandTimeoutLong(RedisConnectionFactory factory) {
+            java.time.Duration commandTimeout = resolveCommandTimeout(factory);
+            if (commandTimeout != null && commandTimeout.compareTo(java.time.Duration.ofSeconds(5)) > 0) {
+                log.warn("Redis 命令超时为 {}（建议 1~5s）：L2 故障降级以单次调用失败为边界，"
+                        + "命令超时过长时 Redis 抖动会阻塞业务读线程到超时才降级。"
+                        + "可通过 spring.data.redis.timeout 调整",
+                        commandTimeout);
+            }
         }
 
         @Bean
@@ -204,6 +226,32 @@ public class CacheKitAutoConfiguration {
             container.addMessageListener(subscriber,
                     new ChannelTopic(props.getBroadcast().getTopic()));
             return container;
+        }
+    }
+
+    /**
+     * 反射读取工厂的命令超时（Lettuce/Jedis 的 {@code getClientConfiguration().getCommandTimeout()}）：
+     * lettuce/jedis 是可选依赖，直接引用其类会在缺依赖宿主上 NoClassDefFoundError；
+     * 非标准工厂实现或读取失败返回 null（调用方按"无从判断"跳过告警）。
+     */
+    static java.time.Duration resolveCommandTimeout(RedisConnectionFactory factory) {
+        if (factory == null) {
+            return null;
+        }
+        try {
+            Object clientConfiguration = factory.getClass().getMethod("getClientConfiguration").invoke(factory);
+            if (clientConfiguration == null) {
+                return null;
+            }
+            // setAccessible：客户端配置实现类（如 DefaultLettuceClientConfiguration）是包私有类，
+            // 其公共方法直接 invoke 会抛 IllegalAccessException
+            java.lang.reflect.Method method =
+                    clientConfiguration.getClass().getMethod("getCommandTimeout");
+            method.setAccessible(true);
+            Object timeout = method.invoke(clientConfiguration);
+            return timeout instanceof java.time.Duration d ? d : null;
+        } catch (Exception ignored) {
+            return null;
         }
     }
 
@@ -358,7 +406,19 @@ public class CacheKitAutoConfiguration {
 
         @Bean
         public BinlogLifecycle cacheKitBinlogLifecycle(com.github.shyiko.mysql.binlog.BinaryLogClient client) {
-            return new BinlogLifecycle(client, "cache-kit-binlog");
+            return new BinlogLifecycle(client, binlogEventListener(client), "cache-kit-binlog");
+        }
+
+        /**
+         * 取出已注册到 client 的 {@link BinlogInvalidationListener}：BinlogLifecycle 需要
+         * 其事件计数判定"连上即秒断"（位点被服务端清理的兜底）。
+         */
+        private BinlogInvalidationListener binlogEventListener(com.github.shyiko.mysql.binlog.BinaryLogClient client) {
+            return client.getEventListeners().stream()
+                    .filter(BinlogInvalidationListener.class::isInstance)
+                    .map(BinlogInvalidationListener.class::cast)
+                    .findFirst()
+                    .orElse(null);
         }
     }
 }

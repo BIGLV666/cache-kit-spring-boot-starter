@@ -195,7 +195,9 @@ class CachedQueryAspectTest {
 
         List<UserEntity> second = proxy.selectByPhones(List.of("13800001111"));
         assertThat(second).hasSize(1);
-        assertThat(dbHits.get()).as("非主键集合恒回 DB（旁路不缓存）").isEqualTo(2);
+        // 0.3.1 起误判旁路统一"全参重查"保证结果完整：每次调用 =
+        // 误判探测回源（按缺失子集 IN）1 次 + 原始参数重查 1 次，两次调用共 4 次 DB
+        assertThat(dbHits.get()).as("非主键集合恒回 DB（旁路不缓存）").isEqualTo(4);
     }
 
     @Test

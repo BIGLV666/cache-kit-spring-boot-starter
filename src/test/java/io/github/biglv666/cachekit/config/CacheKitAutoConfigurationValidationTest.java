@@ -49,4 +49,25 @@ class CacheKitAutoConfigurationValidationTest {
                     assertThat(ctx.getBean(CacheKitProperties.class)).isNotNull();
                 });
     }
+
+    @Test
+    void nonPositiveL2TtlShouldDisableL2InsteadOfFailingStartup() {
+        // l2.ttl 非正值 = 禁用 L2 写入（仅告警），不得被 L1/L2 倒装校验拦截——
+        // 否则任何正值的 l1.ttl（含默认 30s）都会让该文档化配置路径启动失败
+        for (String ttl : new String[]{"0", "-1"}) {
+            new ApplicationContextRunner()
+                    .withConfiguration(AutoConfigurations.of(
+                            org.springframework.boot.autoconfigure.data.redis.RedisAutoConfiguration.class,
+                            CacheKitAutoConfiguration.class))
+                    .withPropertyValues(
+                            "spring.data.redis.host=localhost",
+                            "spring.data.redis.port=6379",
+                            "cache-kit.l2.ttl=" + ttl)
+                    .run(ctx -> {
+                        assertThat(ctx).as("l2.ttl=%s 时应正常启动", ttl).hasNotFailed();
+                        assertThat(ctx.getBean(CacheKitProperties.class).getL2().getTtl())
+                                .as("l2.ttl=%s 应保持非正值语义", ttl).isLessThanOrEqualTo(java.time.Duration.ZERO);
+                    });
+        }
+    }
 }

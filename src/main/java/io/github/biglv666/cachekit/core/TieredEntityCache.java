@@ -264,11 +264,14 @@ public class TieredEntityCache {
     /**
      * 带严格模式守卫的批量 read-through：{@code strictIds} 为 true 时（注解列表查询路径），
      * 回源结果的主键必须全部能对上请求值，且结果非空——对不上或为空说明请求集合不是主键集合
-     * （如把手机号列表当 ID 拆解），抛出携带回源原始结果的 {@link IdMisfireException}，
-     * 由调用方按条件查询旁路（警告 + 不缓存 + 原样返回），绝不返回空数据或写错键占位。
+     * （如把手机号列表当 ID 拆解），向 strict 调用方抛出携带回源原始结果的 {@link IdMisfireException}，
+     * 由调用方按条件查询旁路（警告 + 全参重查 + 不缓存），绝不返回空数据或写错键占位。
      * 空结果同样旁路：无法证明请求值是主键，给它写 null 占位的话，占位键永远不会被
      * 该行后续 insert 的失效命中（insert 失效走真实主键）。
      * MP {@code selectBatchIds} 路径请求值即主键，无需开启。
+     *
+     * <p>误判时 shared future 仍按真实数据正常完成（行命中照常缓存、缺失仅完成 null），
+     * join 这些 future 的非 strict 等待者不受本次误判影响；误判异常只抛给当前调用方。</p>
      */
     public Object[] loadBatch(EntityMetadata meta, List<Object> ids, boolean cacheNull,
                               Duration ttlOverride, Function<List<Object>, List<Object>> dbBatchLoader,
@@ -308,6 +311,8 @@ public class TieredEntityCache {
             throw t instanceof RuntimeException re ? re : new CacheKitException(t);
         }
 
+        boolean misfired = false;
+        List<Object> misfireFresh = List.of();
         if (!ownedIds.isEmpty()) {
             try {
                 List<Object> fresh = dbBatchLoader.apply(ownedIds);
@@ -335,7 +340,13 @@ public class TieredEntityCache {
                         }
                     }
                     if (!allMatched) {
-                        throw new IdMisfireException(meta.entityType(), fresh);
+                        // 误判：shared future 不能异常完成——同一 future 可能被非 strict 路径
+                        //（MP selectBatchIds）或更早到达的 strict 等待者 join，异常完成会把
+                        // 本次误判泄漏给无关调用方。改为逐槽按真实数据正常完成
+                        //（行命中照常缓存——键即真实主键，安全；缺失仅完成 null、不写占位），
+                        // 误判异常只抛给当前 strict 调用方，由其旁路全参重查
+                        misfired = true;
+                        misfireFresh = fresh;
                     }
                 }
                 for (int i = 0; i < ownedIds.size(); i++) {
@@ -357,12 +368,14 @@ public class TieredEntityCache {
                             payload = entity;
                         }
                     } else {
-                        if (cacheNull) {
+                        // 误判时缺失 ID 不写 null 占位：请求值尚未被证明是主键，
+                        // 占位键不会被对应行后续 insert 的失效命中（strict 语义不变）
+                        if (cacheNull && !misfired) {
                             Duration nullTtl = props.getL2().getNullTtl();
                             putBoth(keys[ownedIdx.get(i)], JsonCodec.NULL_SENTINEL, nullTtl, l1TtlFor(nullTtl));
                             metrics.nullPlaceholder();
                         }
-                        payload = cacheNull ? JsonCodec.NULL_SENTINEL : null;
+                        payload = cacheNull && !misfired ? JsonCodec.NULL_SENTINEL : null;
                     }
                     slots[ownedIdx.get(i)].complete(payload);
                 }
@@ -376,6 +389,9 @@ public class TieredEntityCache {
                     inflight.remove(keys[ownedIdx.get(i)], slots[ownedIdx.get(i)]);
                 }
             }
+        }
+        if (misfired) {
+            throw new IdMisfireException(meta.entityType(), misfireFresh);
         }
 
         Object[] out = new Object[n];

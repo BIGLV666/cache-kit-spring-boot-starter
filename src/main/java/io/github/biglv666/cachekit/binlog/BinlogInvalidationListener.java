@@ -25,6 +25,7 @@ import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.atomic.AtomicLong;
 
 /**
  * binlog 行事件失效监听器：订阅 MySQL binlog，任何来源（DBA、其他服务、脚本）对
@@ -51,6 +52,8 @@ public class BinlogInvalidationListener implements BinaryLogClient.EventListener
     private final Map<String, Long> pkLookupFailedAt = new ConcurrentHashMap<>();
     private static final long PK_LOOKUP_COOLDOWN_NS = 30_000_000_000L;
     private volatile long lastPkLookupWarnAt;
+    /** 已接收事件总数（含非行事件）：供 BinlogLifecycle 判断"连上后是否收到过事件" */
+    private final java.util.concurrent.atomic.AtomicLong receivedEvents = new AtomicLong();
 
     public BinlogInvalidationListener(TieredEntityCache tieredCache,
                                       EntityMetadataRegistry registry,
@@ -62,8 +65,19 @@ public class BinlogInvalidationListener implements BinaryLogClient.EventListener
         this.database = database;
     }
 
+    /** 已接收事件总数快照（BinlogLifecycle 重连判定用） */
+    public long receivedEventCount() {
+        return receivedEvents.get();
+    }
+
+    /** 自 {@code mark} 快照后是否收到过新事件 */
+    public boolean receivedEventsSince(long mark) {
+        return receivedEvents.get() != mark;
+    }
+
     @Override
     public void onEvent(Event event) {
+        receivedEvents.incrementAndGet();
         try {
             EventType type = event.getHeader().getEventType();
             if (type == EventType.TABLE_MAP) {
