@@ -88,7 +88,25 @@ public interface UserMapper {
 private EntityCache<User> userCache;
 
 User u = userCache.get(id, () -> mapper.selectByUserId(id));
+List<User> users = userCache.getBatch(ids, mapper::selectBatchIds);  // single-flight + MGET
 userCache.evict(id);
+userCache.evictBatch(ids);
+```
+
+### 启动预热（0.3.1+）
+
+热点数据在启动后自动回填缓存：标注 `@CacheWarmup` 的 Bean 方法会在上下文就绪后于后台线程
+执行一次，方法体内正常走缓存路径（mapper 查询、`EntityCache.get`），回填由既有链路完成。
+多个方法按 Bean 顺序依次执行，单个方法异常只告警不影响启动；`cache-kit.warmup.enabled=false` 关闭。
+
+```java
+@Component
+static class HotDataWarmup {
+    @CacheWarmup
+    void loadHotUsers() {
+        userMapper.selectBatchIds(List.of(1L, 2L, 3L));
+    }
+}
 ```
 
 ## binlog 直连失效（0.2.0+，覆盖"绕过应用的写"）
@@ -161,6 +179,8 @@ cache-kit:
   tx:                     # 事务感知失效（spring-tx 在类路径时生效）
     evict-after-commit: true       # 写方法处于活动事务时，失效延迟到 afterCommit；回滚不失效。
                                    # 关闭后若事务耗时超过 double-delete-delay，脏值存活至 L2 TTL（长事务勿关）
+  warmup:                  # 启动预热（0.3.1+）
+    enabled: true          # false 时 @CacheWarmup 方法不执行
   binlog:                  # binlog 直连失效（0.2.0+，缺省关闭）
     enabled: false
     host:                  # 缺省从 spring.datasource.url 解析
@@ -232,6 +252,8 @@ cache-kit:
   `cache-kit.invalidation.delay` 失效传播延迟 Timer（p50/p99，含时钟偏差，趋势观测用）、
   Grafana 面板模板（`docs/grafana-dashboard.json`）
 - **测试**：Testcontainers 端到端覆盖 binlog 断线重连回放与位点被 PURGE 后自动重置恢复失效
+- **新增**：`@CacheWarmup` 启动预热（`cache-kit.warmup.enabled`，默认开）；`EntityCache` 批量接口
+  `getBatch`（single-flight 合并回源）/ `evictBatch`
 
 ## 0.3.0 变更
 

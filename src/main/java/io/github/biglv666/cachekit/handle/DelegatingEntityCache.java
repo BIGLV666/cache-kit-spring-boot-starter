@@ -6,6 +6,11 @@ import io.github.biglv666.cachekit.core.TieredEntityCache;
 import io.github.biglv666.cachekit.metadata.EntityMetadata;
 import io.github.biglv666.cachekit.metadata.EntityMetadataRegistry;
 
+import java.util.ArrayList;
+import java.util.HashMap;
+import java.util.List;
+import java.util.Map;
+import java.util.function.Function;
 import java.util.function.Supplier;
 
 /**
@@ -45,12 +50,52 @@ public class DelegatingEntityCache<T> implements EntityCache<T> {
     }
 
     @Override
+    @SuppressWarnings("unchecked")
+    public List<T> getBatch(List<Object> ids, Function<List<Object>, List<T>> dbLoader) {
+        EntityMetadata meta = registry.require(entityType);
+        // loadBatch 假定调用方已用 peek 拆分命中/未命中（注解路径同约定）：先窥探再只回源缺失部分，
+        // 否则已在缓存中的键会被"回源结果里没有它"覆盖成 null 占位
+        List<TieredEntityCache.CachePeek> peeks = tieredCache.peekBatch(meta, ids);
+        List<Object> missing = new ArrayList<>();
+        for (int i = 0; i < ids.size(); i++) {
+            if (peeks.get(i).state() == TieredEntityCache.CachePeek.State.MISS) {
+                missing.add(ids.get(i));
+            }
+        }
+        Map<Object, Object> loaded = new HashMap<>();
+        if (!missing.isEmpty()) {
+            Object[] out = tieredCache.loadBatch(meta, missing, true, null,
+                    m -> (List<Object>) (List<?>) dbLoader.apply(m));
+            for (int i = 0; i < missing.size(); i++) {
+                loaded.put(missing.get(i), out[i]);
+            }
+        }
+        List<T> result = new ArrayList<>(ids.size());
+        for (int i = 0; i < ids.size(); i++) {
+            TieredEntityCache.CachePeek p = peeks.get(i);
+            result.add(p.state() == TieredEntityCache.CachePeek.State.MISS
+                    ? (T) loaded.get(ids.get(i)) : (T) p.value());
+        }
+        return result;
+    }
+
+    @Override
     public void evict(Object id) {
         EntityMetadata meta = registry.require(entityType);
         if (invalidationDelegate != null) {
             invalidationDelegate.evictSmart(meta, id);
         } else {
             tieredCache.evict(meta, id);
+        }
+    }
+
+    @Override
+    public void evictBatch(Iterable<Object> ids) {
+        EntityMetadata meta = registry.require(entityType);
+        if (invalidationDelegate != null) {
+            invalidationDelegate.evictSmartBatch(meta, ids);
+        } else {
+            tieredCache.evictBatch(meta, ids);
         }
     }
 }

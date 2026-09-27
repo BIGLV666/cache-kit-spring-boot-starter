@@ -2,6 +2,8 @@ package io.github.biglv666.cachekit.handle;
 
 import io.github.biglv666.cachekit.core.EntityCache;
 
+import java.util.List;
+import java.util.function.Function;
 import java.util.function.Supplier;
 
 /**
@@ -18,7 +20,17 @@ final class NoopEntityCache<T> implements EntityCache<T> {
     }
 
     @Override
+    public List<T> getBatch(List<Object> ids, Function<List<Object>, List<T>> dbLoader) {
+        return dbLoader.apply(ids);
+    }
+
+    @Override
     public void evict(Object id) {
+        // 组件已关闭：空操作
+    }
+
+    @Override
+    public void evictBatch(Iterable<Object> ids) {
         // 组件已关闭：空操作
     }
 }

@@ -139,6 +139,14 @@ public class CacheKitAutoConfiguration {
 
     @Bean
     @ConditionalOnMissingBean
+    @ConditionalOnProperty(prefix = "cache-kit.warmup", name = "enabled", havingValue = "true", matchIfMissing = true)
+    public io.github.biglv666.cachekit.warmup.CacheWarmupRunner cacheKitWarmupRunner(
+            org.springframework.context.ApplicationContext applicationContext) {
+        return new io.github.biglv666.cachekit.warmup.CacheWarmupRunner(applicationContext);
+    }
+
+    @Bean
+    @ConditionalOnMissingBean
     public CachedQueryAspect cachedQueryAspect(TieredEntityCache tieredEntityCache,
                                                EntityMetadataRegistry registry) {
         return new CachedQueryAspect(tieredEntityCache, registry);
