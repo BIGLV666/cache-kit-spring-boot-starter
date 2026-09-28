@@ -66,6 +66,18 @@ JetCache 多级 8 线程即到顶 645 万，线程加倍吞吐不动、p99 从 3
 这是并发扩展性差异，不是单次读更快。本地命中层两者同属亚微秒~微秒档，
 **该行差异不构成选型依据**；真正的分野是有无本地层（~550 倍）与默认防击穿（场景 2）。
 
+**尾延迟劣化的机制（为什么 JetCache 多级 p99 随并发恶化）**：
+1. 普遍规律：并发升高使资源利用率逼近饱和，等待时间非线性放大——所有实现都有，只是幅度不同。
+2. JetCache 本地缓存为支持 `expireAfterAccess` 语义，用了 Caffeine 自定义 `Expiry`——Caffeine
+   **每次读都回调 `expireAfterRead`**（内部 `System.currentTimeMillis()` + 随时间连续变化的剩余时间重算），
+   返回值漂移导致 Caffeine 对热点条目频繁重排定时器（共享写）。隔离实验
+   （`CacheExpiryTailTest`，16 线程裸 Caffeine 对比）：变量 Expiry 比固定 expireAfterWrite
+   吞吐低 ~25%，max 尾部出现 300ms 级尖刺。
+3. 叠加多级包装的每次读分配（CacheGetResult/两级迭代/holder 检查），高并发下争用放大。
+4. cache-kit 反例佐证主导因素：同样 Caffeine、同样 1000 键、同样线程数，用固定
+   `expireAfterWrite` 的纯读路径 p99 稳定 ~1µs——它甚至分配更多（每次命中 Jackson 反序列化），
+   说明分配/GC 不是尾延迟的主导，**每读回调 + 条目重排的共享写才是**。
+
 ### 场景 2：缓存击穿（200 并发打同一冷键，模拟 50ms DB）
 
 | 实现 | DB 回源次数 | 总耗时 |
