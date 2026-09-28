@@ -128,4 +128,3 @@ Topic docs live under [`docs/`](docs/) and are currently written in Chinese:
 | [docs/LIMITATIONS.md](docs/LIMITATIONS.md) | MVP boundaries, known limitations, FAQ |
 | [docs/BOOT4-NATIVE.md](docs/BOOT4-NATIVE.md) | Spring Boot 4 compatibility, GraalVM native-image |
 | [docs/CHANGELOG.md](docs/CHANGELOG.md) | release notes |
-| [docs/DEV.md](docs/DEV.md) | build, local containers, release process, test layout |

@@ -115,6 +115,5 @@ cache-kit:
 | [docs/LIMITATIONS.md](docs/LIMITATIONS.md) | MVP 边界、已知限制、FAQ |
 | [docs/BOOT4-NATIVE.md](docs/BOOT4-NATIVE.md) | Spring Boot 4 兼容、GraalVM native-image |
 | [docs/CHANGELOG.md](docs/CHANGELOG.md) | 版本变更记录 |
-| [docs/DEV.md](docs/DEV.md) | 构建、本地容器、发布流程、测试布局 |
 
 English: see [README_EN.md](README_EN.md)（topic docs 目前为中文）。
