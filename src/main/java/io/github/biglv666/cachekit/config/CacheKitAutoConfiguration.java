@@ -220,17 +220,41 @@ public class CacheKitAutoConfiguration {
             if (!props.getBroadcast().isEnabled()) {
                 return new NoopInvalidationPublisher();
             }
+            String mode = props.getBroadcast().getMode();
+            if ("streams".equalsIgnoreCase(mode)) {
+                return new io.github.biglv666.cachekit.core.StreamsInvalidationPublisher(
+                        l2Channel.template(), props.getBroadcast().getTopic(),
+                        props.getBroadcast().getStreamsMaxlen());
+            }
+            if (!"pubsub".equalsIgnoreCase(mode)) {
+                throw new CacheKitException("cache-kit.broadcast.mode 仅支持 pubsub 或 streams: " + mode);
+            }
             return new RedisInvalidationPublisher(l2Channel.template(), props.getBroadcast().getTopic());
         }
 
+        /**
+         * 失效广播接收端（enabled=true 时按 mode 装配其一）：pubsub → RedisMessageListenerContainer；
+         * streams → 每实例独立消费组的 {@code StreamsInvalidationConsumer}（SmartLifecycle，容器负责 start/stop）。
+         * 返回 Object：接收端类型由 mode 决定；mode 非法时发布器 Bean 处已 fail-fast。
+         */
         @Bean
         @ConditionalOnProperty(prefix = "cache-kit.broadcast", name = "enabled",
                 havingValue = "true", matchIfMissing = true)
-        public RedisMessageListenerContainer cacheKitInvalidationContainer(RedisChannel l2Channel,
-                                                                           CaffeineChannel l1Channel,
-                                                                           EntityMetadataRegistry registry,
-                                                                           CacheKitProperties props,
-                                                                           ObjectProvider<io.github.biglv666.cachekit.core.CacheMetricsListener> metricsProvider) {
+        public Object cacheKitInvalidationReceiver(RedisChannel l2Channel,
+                                                   CaffeineChannel l1Channel,
+                                                   EntityMetadataRegistry registry,
+                                                   CacheKitProperties props,
+                                                   ObjectProvider<io.github.biglv666.cachekit.core.CacheMetricsListener> metricsProvider) {
+            String mode = props.getBroadcast().getMode();
+            io.github.biglv666.cachekit.core.BroadcastApplier applier =
+                    new io.github.biglv666.cachekit.core.BroadcastApplier(
+                            l1Channel, registry, props.getKeyNamespace());
+            applier.setMetricsListener(metricsProvider.getIfAvailable());
+            if ("streams".equalsIgnoreCase(mode)) {
+                return new io.github.biglv666.cachekit.core.StreamsInvalidationConsumer(
+                        l2Channel.template(), applier, props.getBroadcast().getTopic());
+            }
+            // pubsub（默认）
             RedisMessageListenerContainer container = new RedisMessageListenerContainer();
             container.setConnectionFactory(l2Channel.template().getConnectionFactory());
             InvalidationSubscriber subscriber = new InvalidationSubscriber(l1Channel, registry, props.getKeyNamespace());

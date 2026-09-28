@@ -274,10 +274,14 @@ public class CacheKitProperties {
 
     /** 失效广播配置 */
     public static class Broadcast {
-        /** 是否启用 pub/sub 失效广播（需 Redis；多实例部署必须开启） */
+        /** 是否启用失效广播（需 Redis；多实例部署必须开启） */
         private boolean enabled = true;
-        /** 广播 topic */
+        /** 广播通道：pubsub（fire-and-forget，进程内存占用为零）或 streams（消费组 ACK，实例短暂掉线不丢） */
+        private String mode = "pubsub";
+        /** 广播 topic（streams 模式下为 Stream 键） */
         private String topic = "cache-kit:invalidate";
+        /** streams 模式下 Stream 的近似裁剪上界（XADD MAXLEN ~）：防无限增长 */
+        private int streamsMaxlen = 10_000;
 
         public boolean isEnabled() {
             return enabled;
@@ -287,12 +291,28 @@ public class CacheKitProperties {
             this.enabled = enabled;
         }
 
+        public String getMode() {
+            return mode;
+        }
+
+        public void setMode(String mode) {
+            this.mode = mode;
+        }
+
         public String getTopic() {
             return topic;
         }
 
         public void setTopic(String topic) {
             this.topic = topic;
+        }
+
+        public int getStreamsMaxlen() {
+            return streamsMaxlen;
+        }
+
+        public void setStreamsMaxlen(int streamsMaxlen) {
+            this.streamsMaxlen = streamsMaxlen;
         }
     }
 
