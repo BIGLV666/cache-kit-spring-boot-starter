@@ -60,4 +60,6 @@ jobs:
           EOF
 
       - name: Test, sign and publish
-        run: mvn -B -ntp verify deploy -Dgpg.passphrase=${{ secrets.GPG_PASSPHRASE }}
+        # 单目标 deploy：`verify deploy` 双目标会触发 central-publishing 的执行计划重算，
+        # 使构建跑两遍（source/javadoc attach 重复报 "duplicated artifacts attached"）
+        run: mvn -B -ntp deploy -Dgpg.passphrase=${{ secrets.GPG_PASSPHRASE }}
