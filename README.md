@@ -2,20 +2,22 @@
 
 [![Maven Central](https://img.shields.io/maven-central/v/io.github.biglv666/cache-kit-spring-boot-starter)](https://central.sonatype.com/artifact/io.github.biglv666/cache-kit-spring-boot-starter) [![CI](https://github.com/BIGLV666/cache-kit-spring-boot-starter/actions/workflows/ci.yml/badge.svg)](https://github.com/BIGLV666/cache-kit-spring-boot-starter/actions/workflows/ci.yml)
 
+**中文** | [English](README_EN.md)
+
 实体元数据驱动的三级缓存组件：**Caffeine（L1）→ Redis（L2）→ DB（loader）** read-through。
 对 MyBatis-Plus 用户**零注解接入**；binlog 直连失效补齐"绕过应用的写"盲区；
-一致性语义为**最终一致**——常态秒级（双删窗口内），最坏受 L2 TTL 上界约束（见"一致性机制"）。
+一致性语义为**最终一致**——常态秒级（双删窗口内），最坏受 L2 TTL 上界约束（[机制与实测](docs/CONSISTENCY.md)）。
 
 ## 特性
 
 - 三级 read-through：L1 → L2 → 方法体（查 DB），命中逐级回填
-- 实体元数据自动推导缓存键（`表名:主键`），无需手写 SpEL 键表达式
-- MyBatis-Plus 注解复用：`@TableName` / `@TableId` 即元数据，`selectById` / `selectBatchIds` / `updateById` / `deleteById` 零注解自动接入
-- 主键批量查询 per-ID 拆解：命中部分直接用，缺失集合才回源；"已确认不存在"用 null 占位（IN 语义）
-- 并发防护四件套：single-flight 防击穿、TTL 随机抖动防雪崩、null 短 TTL 防穿透、L1 短 TTL 兜底 pub/sub 丢消息
-- 多实例一致性：写后删缓存 + Redis pub/sub 失效广播 + 延迟双删
-- **binlog 直连失效（0.2.0+）**：直连 MySQL binlog，DBA 改库、其他服务写入也能秒级失效，无需部署 Canal
-- **IService 批量写失效（0.3.0+）**：saveBatch / updateBatchById / saveOrUpdateBatch 自动失效（SqlSession 批量通道绕过 mapper 代理，独立切面覆盖）
+- 缓存键由实体元数据自动推导（`表名:主键`），无需手写 SpEL 键表达式
+- MyBatis-Plus 注解复用：`@TableName` / `@TableId` 即元数据，读写作自动接入
+- 批量 per-ID 拆解：命中直接用、缺失才回源；single-flight 防击穿、TTL 抖动防雪崩、null 占位防穿透
+- 多实例一致性：写后删缓存 + 失效广播（pub/sub 或 Streams 消费组）+ 延迟双删
+- binlog 直连失效：DBA 改库、其他服务写入也能秒级失效，无需 Canal（[文档](docs/BINLOG.md)）
+- `@CacheWarmup` 启动预热、`EntityCache` 手动句柄、`L1Channel` 可插拔 SPI
+- 可观测性：Micrometer 计数器/命中率 Gauge/传播延迟 Timer + Grafana 面板（[文档](docs/OBSERVABILITY.md)）
 - 强一致读出口：`CacheKit.withDb(...)` 作用域旁路
 
 ## 快速开始
@@ -26,11 +28,12 @@
 <dependency>
     <groupId>io.github.biglv666</groupId>
     <artifactId>cache-kit-spring-boot-starter</artifactId>
-    <version>0.3.0</version>
+    <version>0.3.1</version>
 </dependency>
 ```
 
-要求 JDK 17+、Spring Boot 3.5.x。L2（Redis）与 MyBatis-Plus 适配按类路径自动启用。
+要求 JDK 17+、Spring Boot 3.5.x（Boot 4 前向兼容，见 [docs/BOOT4-NATIVE.md](docs/BOOT4-NATIVE.md)）。
+L2（Redis）与 MyBatis-Plus 适配按类路径自动启用。
 
 ### MyBatis-Plus 项目（零注解）
 
@@ -42,19 +45,17 @@ public class User {
     private String userName;
 }
 
-userMapper.selectById(1L);    // 自动走三级缓存
+userMapper.selectById(1L);                       // 自动走三级缓存
 userMapper.selectBatchIds(List.of(1L, 2L, 3L));  // per-ID 拆解：命中直接用，缺失才回源
-userMapper.updateById(user);  // 自动失效 + 广播 + 延迟双删
+userMapper.updateById(user);                     // 自动失效 + 广播 + 延迟双删
 ```
 
-批量语义：缓存键与单条查询完全相同（`表名:主键`），逐 ID 三态（命中值 / 已缓存空 / 未命中）；
-"已确认不存在"缓存 null 占位（短 TTL），IN 查询里自动消失；结果按请求顺序输出、跳过不存在的 ID。
-
 写覆盖范围（自动失效，无需注解）：
+
 - `updateById` / `deleteById` / `deleteByIds` / `insert`：经 mapper 代理，切面直接拦截
-- **`IService.saveBatch` / `updateBatchById` / `saveOrUpdateBatch`（0.3.0+）**：这些方法在 MP 内部经
-  SqlSession 批量语句执行、**绕过 mapper 代理**，由独立的 service 切面覆盖（切面会给 IService 实现加 AOP 代理，Boot 默认 CGLIB）
-- **条件写（`update(Wrapper)` / `delete(Wrapper)` 等不带主键值的写）无法精确失效**——开启 binlog 可覆盖，否则靠 TTL 兜底
+- **`IService.saveBatch` / `updateBatchById` / `saveOrUpdateBatch`（0.3.0+）**：SqlSession 批量通道绕过
+  mapper 代理，由独立 service 切面覆盖
+- **条件写（`update(Wrapper)` 等）无法精确失效**——开启 binlog 可覆盖，否则靠 TTL 兜底
 
 ### 非 MP 项目（实体注解）
 
@@ -66,267 +67,54 @@ public class User {
     private String userName;
 }
 
-@Mapper
-public interface UserMapper {
-    @CachedQuery
-    User selectByUserId(@Param("userId") Long userId);
+@CachedQuery
+User selectByUserId(@Param("userId") Long userId);
 
-    @CacheInvalidate(entity = User.class)
-    int updateStatus(@Param("userId") Long userId, @Param("status") int status);
-}
+@CacheInvalidate(entity = User.class)
+int updateStatus(@Param("userId") Long userId, @Param("status") int status);
 ```
 
-主键推导（严格模式）：① 参数中有实体实例（`updateById(User)`）→ ② 标量参数且参数名与主键字段同名
-（匹配 MyBatis `@Param` 值或 Java 参数名，需 `-parameters` 编译，Boot 父 POM 默认开启）。
-两条路都走不通（如条件字段查询 `selectByPhone(String phone)`）会打警告并**直查 DB**——
-猜测式推导会把条件值当主键回填 `表:<条件值>`，造成键空间混淆且行更新时失效链路断裂，因此被代码强制拒绝。
+主键推导是**严格模式**：参数含实体实例，或标量参数名与主键字段同名；两条路都走不通（条件字段查询）
+会警告并直查 DB，绝不猜测——[边界与 FAQ](docs/LIMITATIONS.md)。
 
-### 注入句柄（手动控制）
+### 手动控制与预热
 
 ```java
 @CacheHandle(User.class)
-private EntityCache<User> userCache;
+private EntityCache<User> userCache;   // get / getBatch / evict / evictBatch
 
-User u = userCache.get(id, () -> mapper.selectByUserId(id));
-List<User> users = userCache.getBatch(ids, mapper::selectBatchIds);  // single-flight + MGET
-userCache.evict(id);
-userCache.evictBatch(ids);
+@CacheWarmup(order = 10)               // 上下文就绪后自动执行一次，回填热点数据
+void loadHotUsers() { userMapper.selectBatchIds(List.of(1L, 2L, 3L)); }
 ```
 
-### 启动预热（0.3.1+）
-
-热点数据在启动后自动回填缓存：标注 `@CacheWarmup` 的 Bean 方法会在上下文就绪后于后台线程
-执行一次，方法体内正常走缓存路径（mapper 查询、`EntityCache.get`），回填由既有链路完成。
-多个方法按 Bean 顺序依次执行，单个方法异常只告警不影响启动；`cache-kit.warmup.enabled=false` 关闭。
-
-```java
-@Component
-static class HotDataWarmup {
-    @CacheWarmup
-    void loadHotUsers() {
-        userMapper.selectBatchIds(List.of(1L, 2L, 3L));
-    }
-}
-```
-
-## binlog 直连失效（0.2.0+，覆盖"绕过应用的写"）
-
-广播失效的前提是写走应用路径。DBA 改库、其他服务写同一张表时，cache-kit 无法感知——
-binlog 直连失效模块补上这个盲区：以 MySQL replica 协议直连 binlog（ROW 格式），
-任何来源对已缓存实体表的写入都会按行提取主键并触发失效。
-
-**不需要部署 Canal Server**：类路径引入 `mysql-binlog-connector-java`（本 starter 中声明为 optional，
-仅启用 binlog 的服务需要自行添加该依赖）+ 开启开关即可。**防呆**：`cache-kit.binlog.enabled=true`
-但类路径缺 connector 时启动直接失败并提示补依赖——绝不静默跳过（0.3.1 起）。
-MySQL 需开启 `log_bin`、
-`binlog_format=ROW`、`binlog_row_image=FULL`（MINIMAL 会让行镜像缺主键列，按行失效静默丢失），
-且账号具备 `REPLICATION SLAVE` 权限。
+### 最小配置
 
 ```yaml
 cache-kit:
-  binlog:
-    enabled: true        # 缺省关闭
-    # host/port/database 缺省从 spring.datasource.url 解析，账号缺省用数据源账号
-    # server-id 缺省自动生成随机值；同一 MySQL 上多副本部署建议显式配置
-    server-id: 18365     # 同一 MySQL 上必须唯一（与 MySQL server-id 及其他副本不同）
+  l1:
+    ttl: 30s
+  l2:
+    ttl: 10m
+  # broadcast:
+  #   mode: streams     # 多实例且对"重启窗口丢失效"敏感时启用（默认 pubsub）
+  # binlog:
+  #   enabled: true     # 覆盖"绕过应用的写"
 ```
 
-注意：MySQL 8.4 移除了 `SHOW MASTER STATUS`，需 connector 0.30.0+（本 starter 默认 0.31.0）。
+完整参数见 [docs/CONFIG.md](docs/CONFIG.md)。
 
-**断线重连语义**：connector 内部随事件流推进 binlog 位点，断线重连自动从最后位点续传（原生支持，无需配置），
-断连窗口内的事件会被自动回放，重复回放的失效是幂等 DEL，无害。若记录位点对应的 binlog 文件在长断连期间
-被服务端清理（binlog 过期 / `PURGE BINARY LOGS`），重连会报错秒断并无限循环——监听器检测到
-"连上即秒断且未收到任何事件"连续 5 轮后，自动重置为最新位点继续监听并告警（断连窗口内的事件失效丢失由 L2 TTL 兜底）。
+## 文档
 
-实测：直写 → 失效 → 下次读到新值，端到端传播延迟 **avg 10.3ms / p99 14.2ms / max 53.7ms**（300 次直写零漏失效，含 5ms 轮询测量粒度）。
-
-## 强一致读（豁免）
-
-缓存是最终一致的。需要强一致的场景按档位选用：
-
-| 档位 | 用法 | 适用 |
-|---|---|---|
-| 自定义方法不加注解 | `selectByIdFromDb(Long id)` | 已知某方法永远要 DB |
-| ThreadLocal 旁路 | `CacheKit.withDb(() -> mapper.selectById(id))` | 调用点临时决定 |
-| SpEL 条件 | `@CachedQuery(condition = "!forceDb")` | 由调用方传参决定 |
-
-**库存扣减、余额等强一致判断所依赖的字段不要进缓存**——任何缓存方案（双删、binlog 均不例外）都是最终一致。
-
-## 配置全参考（前缀 `cache-kit.*`）
-
-```yaml
-cache-kit:
-  enabled: true            # 总开关
-  key-namespace:           # 键命名空间：未配置时自动取 spring.application.name（多服务共享 Redis 必要隔离）
-  require-key-namespace: false  # true 时 key-namespace 与 spring.application.name 均为空 → 启动失败（键冲突零容忍场景）
-  l1:                      # 本地缓存（Caffeine，当前版本不支持替换实现）
-    max-entries: 65536     # 最大条目数（条目数上限，不限制单条大小）
-    max-weight-kb: 0       # 权重上限（K 字符）：>0 时取代 max-entries，防大实体撑爆堆内存。
-                           # 实际内存上限 ≈ max-weight-kb × 2KB（BMP 字符 UTF-16 双字节，中文场景）；
-                           # 建议生产环境启用，例如 65536 ≈ 128MB 上限。单条 JSON 按长度/1024 计权重，最小 1
-    ttl: 30s               # L1 TTL：必须显著小于 l2.ttl，是 pub/sub 丢消息时的脏读上界
-  l2:                      # 远程缓存（Redis，类路径有 spring-data-redis 且存在 RedisConnectionFactory 时启用；
-                           # 只有类没有工厂 Bean 时自动降级为 L1-only，不影响启动）
-    ttl: 10m               # L2 TTL 基准；非正值（0/负数）= 跳过 L2 写入（等效禁用 Redis 缓存，启动打警告），
-                           # 不是"永不过期"——组件的脏数据安全模型依赖 TTL 上界
-    jitter: 60s            # TTL 随机抖动上限（防雪崩），0 关闭；基准 TTL 非正时不叠加抖动
-    null-ttl: 30s          # null 占位的短 TTL（防穿透）；非正值 = 不缓存 null 占位（关闭穿透防护）
-    double-delete-delay: 1s  # 延迟双删间隔；写极热键时可调小或评估回源放大
-  broadcast:               # 失效广播（多实例部署必须开启）
-    enabled: true
-    topic: cache-kit:invalidate
-  mp:                      # MyBatis-Plus 适配
-    auto-cache-base-methods: true  # 自动接入总开关：BaseMapper 六方法 + IService 批量写
-                                   # （saveBatch/updateBatchById/saveOrUpdateBatch）；条件写不在范围
-  tx:                     # 事务感知失效（spring-tx 在类路径时生效）
-    evict-after-commit: true       # 写方法处于活动事务时，失效延迟到 afterCommit；回滚不失效。
-                                   # 关闭后若事务耗时超过 double-delete-delay，脏值存活至 L2 TTL（长事务勿关）
-  warmup:                  # 启动预热（0.3.1+）
-    enabled: true          # false 时 @CacheWarmup 方法不执行
-  binlog:                  # binlog 直连失效（0.2.0+，缺省关闭）
-    enabled: false
-    host:                  # 缺省从 spring.datasource.url 解析
-    port:
-    database:
-    username:              # 缺省用数据源账号
-    password:
-    server-id:             # 缺省自动生成随机值；同一 MySQL 上必须唯一
-```
-
-## 一致性机制与性能实测
-
-写路径固定**先写 DB 后删缓存**（Cache-Aside 标准序）。删除动作 = **DEL L2 → 本地 L1 → pub/sub 广播 → 延迟双删**。
-顺序关键：必须先删 L2——若先删 L1，间隙内并发读会 L1 miss 后从 L2 读到旧值并回填 L1，制造可复现脏数据。
-
-脏数据的核心窗口是**回填竞态**（读线程查到旧值、写线程删除后、读线程把旧值回填进 L1/L2）。
-延迟双删压缩该窗口；窗口之外（慢读/长 GC 跨过双删间隔、双删积压丢弃、Redis 宕机期间失效丢失）
-旧值可能复活在 L2 并持续回填各节点 L1，此类场景的真实上界是 **L2 TTL（默认 10m + 抖动）**，
-而非秒级——这是 Cache-Aside 的固有竞态，本组件未用版本号/CAS 消除它，依赖 TTL 上界兜底。
-对一致性敏感的字段请用 `CacheKit.withDb` 旁路或直接不进缓存。
-
-以下为 PaperWise 宿主项目上的实测数据（单机 4~10 实例 + Docker Redis/MySQL，Java 17）：
-
-| 场景 | 实测 |
+| 文档 | 内容 |
 |---|---|
-| 缓存命中读 | 微秒级；20,249 个 HTTP 请求期间 MySQL InnoDB 行读取零增长 |
-| 应用内写失效 | 每写增加约 1~2ms（DEL L2 + 广播 + 双删调度）；4.6 万次广播零丢失 |
-| 广播最终一致性 | 10 实例、716 写/s 并发、4.6 万次广播：全实例最终版本校验 100% 通过 |
-| 脏读窗口（应用内写） | 最大 119ms~505ms（含单 JVM 调度噪声），远小于 L1 TTL 30s 设计上界 |
-| 脏读窗口（binlog 直写） | p99 14.2ms，300 次直写零漏失效 |
-| 外部 HTTP 全链路 | 单实例饱和 ~1700 req/s；延迟基线由鉴权 Redis 往返主导，缓存命中本身微秒级 |
-| 回源放大 | 热键上每次写约 3 次 DB 回源（广播删 + 双删删 + 在途回读），写极热键需评估 |
-| 跨实例击穿放大（0.3.0 量化） | single-flight 仅单 JVM 生效：N 实例同时击穿同一未热键 = N 次 DB 回源（每实例 1 次）；
-  冷启动场景 N×键数 即回源峰值，DB 按 `N × 每秒新增键数` 估算容量；若需全局互斥可外挂分布式锁，组件刻意未内置（锁的开销与死锁面 > 冷启动回源放大） |
+| [docs/BINLOG.md](docs/BINLOG.md) | binlog 直连失效：配置、断线重连语义、排查 |
+| [docs/CONSISTENCY.md](docs/CONSISTENCY.md) | 一致性机制、广播通道选择（pubsub/streams）、对比 benchmark、生产实测 |
+| [docs/CONFIG.md](docs/CONFIG.md) | 配置全参考 |
+| [docs/OBSERVABILITY.md](docs/OBSERVABILITY.md) | Micrometer 指标、告警建议、Grafana 面板 |
+| [docs/RESILIENCE.md](docs/RESILIENCE.md) | 稳健性设计：降级、重试、积压保护、安全边界 |
+| [docs/LIMITATIONS.md](docs/LIMITATIONS.md) | MVP 边界、已知限制、FAQ |
+| [docs/BOOT4-NATIVE.md](docs/BOOT4-NATIVE.md) | Spring Boot 4 兼容、GraalVM native-image |
+| [docs/CHANGELOG.md](docs/CHANGELOG.md) | 版本变更记录 |
+| [docs/DEV.md](docs/DEV.md) | 构建、本地容器、发布流程、测试布局 |
 
-## MVP 边界（0.3.0）
-
-- 仅支持**按主键定位**的查询（单条 + 主键批量 `selectBatchIds` / `@CachedQuery` 返回 `List<实体>` 且参数为 ID 集合）；
-  条件查询（按手机号、状态等）**永久不缓存**——匹配集合未知且不可失效，恒回 DB
-- 不做 write-through / write-behind：写库由业务代码完成，本组件只负责失效
-- 不接管持久层：与 MyBatis/MP 的关系仅是元数据 + AOP
-- 复合主键不支持
-- 写方法处于活动事务时，失效延迟到 **afterCommit** 执行（`cache-kit.tx.evict-after-commit`，默认开），事务回滚不失效。
-  注意语义：同事务内先写后读同键会读到缓存里的**提交前旧值**（失效被延迟了），需要同事务立即可见时用 `CacheKit.withDb` 旁路读取
-- binlog 模式下主键列序号来自 `information_schema`，**按表缓存于进程生命周期内**——改表结构需重启进程后重新解析
-- binlog 与 `CacheKeyCustomizer` 组合存在已知限制：binlog 解析线程无法还原租户键段，租户键的 binlog 失效不会命中（仅 TTL/双删兜底），多租户场景建议暂不启用 binlog
-
-## 已知限制与说明
-
-- **binlog 与事务时序**：MySQL 的 binlog 事件在 **COMMIT 时**才写入（事务内只进 binlog cache），监听端天然只见提交后数据，不存在"提交前触发失效"的竞态；残余的读回填竞态由双删 + TTL 兜底
-- **null 占位与 INSERT**：应用内 `mapper.insert()` 自动清除对应"已确认不存在"占位（新数据立即可见）；binlog 模式下 INSERT 行事件同样覆盖；两者皆无时，占位由 `null-ttl`（默认 30s）兜底
-- **批量缺失回源**：per-ID single-flight 保证每个缺失 ID 至多回源一次；无法保证多个**不同**批量请求合并为一条更大的 IN
-- **主键类型/表名迁移**：旧键成为孤儿由 TTL/L1 上限自然淘汰；如需立即切换，修改 `cache-kit.key-namespace` 整体弃用旧键
-- **L1 不可替换**：本地缓存固定为 CaffeineChannel；L2 通道支持定义自定义 `RedisChannel` Bean 覆盖
-- **单飞等待者共享数据**：single-flight 合并回源时，等待方各自拿到独立解码实例（不共享可变对象）；唯"实体不可序列化"的罕见兜底路径会共享实例
-- **同前缀实体 fail-fast（0.3.0+）**：两个实体解析出相同缓存前缀（如两个类都标 `@TableName("user")`）会在第二次接入时抛异常——同前缀共享键空间会互相覆盖缓存值，字段子集会静默缺字段
-- **`@CacheInvalidate` 严格语义**：实体实例参数与实体集合参数（0.3.0+）可直接解析主键；标量参数需参数名与主键字段同名；**标量集合（`List<Long>` 等）不收**——无法证明元素是主键，防条件值误当主键（MP 的 deleteByIds 路径由自动切面覆盖，无需注解）
-- **`@CachedQuery` 列表查询空结果**：严格守卫下回源结果为空（请求值全部查不到）按误用旁路处理、不缓存——无法证明请求值是主键集合；存在的行照常缓存。误判旁路统一用原始参数**全参重查**保证结果完整（并发重叠请求下不会返回他人线程的回源子集），代价是误用路径多一次 DB 查询
-
-## 0.3.1 变更（未发布）
-
-- **修复**：`cache-kit.l2.ttl` 配置非正值（文档承诺的"禁用 L2 写入"）会被 L1/L2 TTL 倒装校验拦截导致启动失败——非正值时跳过倒装校验，仅告警
-- **修复**：`@CachedQuery` 列表查询误判旁路在并发重叠请求下可能返回他人线程的回源子集（静默缺数据）——统一改为原始参数全参重查；误判时共享 in-flight future 改为按真实数据正常完成，非 strict 路径（MP `selectBatchIds`）的并发等待者不再收到 `IdMisfireException`
-- **增强**：binlog 断线重连位点被服务端清理（binlog 过期/PURGE）时会无限快速重连直至重启——检测到"连上即秒断且无事件"连续 5 轮后自动回退最新位点并告警（断点续传本身由 connector 原生支持）
-- **增强**：L2 装配时检查 Redis 命令超时（>5s 告警），避免 Redis 抖动时业务读线程被阻塞到超时才降级
-- **增强**：失效丢失/降级可观测——新增 `cache-kit.l2.fallbacks{op}`、`cache-kit.evict.retries.exhausted`、
-  `cache-kit.doubledelete.skipped`、`cache-kit.binlog.position.resets` 计数器（重试耗尽与位点重置建议配置告警）
-- **增强**：可观测性深化——`cache-kit.l1.hit.rate` / `cache-kit.l2.hit.rate` 命中率 Gauge、
-  `cache-kit.invalidation.delay` 失效传播延迟 Timer（p50/p99，含时钟偏差，趋势观测用）、
-  Grafana 面板模板（`docs/grafana-dashboard.json`）
-- **测试**：Testcontainers 端到端覆盖 binlog 断线重连回放与位点被 PURGE 后自动重置恢复失效
-- **新增**：`@CacheWarmup` 启动预热（`cache-kit.warmup.enabled`，默认开）；`EntityCache` 批量接口
-  `getBatch`（single-flight 合并回源）/ `evictBatch`
-
-## 0.3.0 变更
-
-- **修复**：`IService.saveBatch` / `updateBatchById` / `saveOrUpdateBatch` 绕过 mapper 代理导致批量更新后缓存脏到 L2 TTL——新增独立 service 切面覆盖
-- **修复**：同前缀双实体互相覆盖缓存值且静默缺字段——注册表 fail-fast
-- **修复**：`@CachedQuery` 列表查询在"请求值全部查不到"时误写错键 null 占位——严格守卫扩展到空结果
-- **增强**：`@CacheInvalidate` 支持实体集合参数（批量写一个注解整体失效）
-- **增强**：L2 删除失败（Redis 闪断）自动重试（复用双删调度器，上限 3 次），降低失效丢失窗口
-- **增强**：批量失效键去重 + Redis 单命令多键 DEL + 管道化 PUBLISH（binlog 大事务命令数从 O(2N) 降为 O(1) 往返）
-- **增强**：`@CachedQuery` 列表空结果旁路、binlog 主键列查询失败 30s 冷却、`peek()` 指标埋点、双删调度器双线程
-- **文档**：L1 内存上界算式（`max-weight-kb × 2KB`）、跨实例击穿回源放大量化、TTL 非正值语义澄清（= 跳过写入，非"永不过期"）、`evict-after-commit=false` 的长事务风险
-
-## 可观测性（Micrometer，自动装配）
-
-宿主类路径有 micrometer-core（spring-boot-starter-actuator 自带）时自动注册 `cache-kit.*` 计数器，
-无需任何配置；也可自行实现 `CacheMetricsListener` Bean 接管。
-
-| 指标 | 含义 |
-|---|---|
-| `cache-kit.l1.requests{result=hit\|miss}` | L1 命中率 |
-| `cache-kit.l2.requests{result=hit\|miss}` | L2 命中率 |
-| `cache-kit.db.loads` | DB 回源（批量按 ID 数计） |
-| `cache-kit.null.placeholders` | null 占位写入（穿透防护触发） |
-| `cache-kit.evict.keys` | 失效键数（含双删第二次） |
-| `cache-kit.broadcast.sent` / `received{applied=true\|false}` | 广播收发——**sent 持续大于 received 说明存在广播丢失**（L1 TTL 兜底） |
-| `cache-kit.l2.fallbacks{op}` | L2 降级次数（op=get/put/multiGet/evictAll），持续增长说明 Redis 不健康 |
-| `cache-kit.evict.retries.exhausted` | L2 删除重试耗尽——**失效丢失**（旧值滞留 L2 至 TTL），建议告警 |
-| `cache-kit.doubledelete.skipped` | 双删积压跳过（脏数据由 TTL 上界兜底），持续增长说明写入压力超调度能力 |
-| `cache-kit.binlog.position.resets` | binlog 位点重置——**断连窗口内失效丢失**（位点被服务端清理时触发），建议告警 |
-| `cache-kit.l1.hit.rate` / `cache-kit.l2.hit.rate` | 命中率 Gauge（hit/(hit+miss)，由计数器实时计算） |
-| `cache-kit.invalidation.delay`（Timer，p50/p99） | binlog 行事件 MySQL 时间戳 → 本实例失效应用的传播延迟；**含两侧时钟偏差，趋势观测用** |
-
-Grafana 面板模板见 [`docs/grafana-dashboard.json`](docs/grafana-dashboard.json)（导入后选择 Prometheus 数据源即可，
-命中/回源速率、失效丢失告警、L2 降级、失效传播延迟开箱即用）。
-
-## 稳健性设计
-
-- **L2 故障降级**：Redis 宕机时按未命中处理（限频告警），业务读写绝不因 L2 失败而失败，由 L1/DB 兜底。
-  注意：降级以"单次 Redis 调用返回异常"为边界——命令超时过长（Lettuce 默认 60s）时 Redis 抖动会先把读线程
-  阻塞到超时才降级，建议配置 `spring.data.redis.timeout: 2s`（装配时超 5s 会告警）
-- **L2 删除失败重试（0.3.0+）**：DEL 恰好落在 Redis 闪断窗口内时旧值会滞留 L2——失效路径按双删延迟自动重试（上限 3 次），进一步压缩"失效丢失"窗口
-- **序列化失败不丢数据**：实体含 Jackson 无法序列化的结构（自引用等）时，本次结果照常返回、只是不缓存；缓存值反序列化失败（实体结构漂移）按未命中处理，回源成功自动覆盖坏值，不触发失效风暴
-- **双删积压保护**：延迟双删任务积压超过 10000 条时跳过新任务并限频告警（脏数据由 TTL 上界兜底）
-- **广播来源校验**：订阅器只清除键前缀能匹配已知实体的广播，防任意客户端清空缓存
-- **Jackson 无多态反序列化**：未启用 default typing，不存在反序列化 gadget 面
-
-## FAQ
-
-**Mapper XML 打包后报 `Invalid bound statement`？**
-这是 MyBatis-Plus 路径大小写问题，与本组件无关但高频踩坑：XML 放在 `resources/Mapper/`（大写）时，`classpath*:/mapper/*.xml` 在 IDE 目录模式能碰巧匹配（NTFS 大小写不敏感），打 jar 后必失败。显式配置 `mybatis-plus.mapper-locations: classpath*:/Mapper/*.xml`。
-
-**binlog 连接失败？**
-依次检查：MySQL 是否开启 `log_bin` 且 `binlog_format=ROW`；`binlog_row_image` 是否为 `FULL`（MINIMAL 时行镜像缺主键列，按行失效会静默丢失）；账号是否有 `REPLICATION SLAVE` 权限；`server-id` 是否与 MySQL 及其他副本冲突；MySQL 8.4 需要 connector 0.30.0+。
-
-**多 Redis 实例部署时广播失效？**
-广播 topic 活在单个 Redis 上，所有实例必须订阅同一个 Redis。用 Redis Cluster 分片扛 L2 流量时，失效 topic 需收敛在专用节点或使用 Redis 7 sharded pub/sub。
-
-**宿主没有 AOP 自动代理（切面不生效）？**
-正常 Spring Boot 应用默认启用。若用 `ApplicationContextRunner` 手动装配测试，记得加 `AopAutoConfiguration`。
-
-## 构建
-
-```bash
-mvn test          # 本地无 Redis/带 binlog 的 MySQL(3307) 时对应集成测试自动跳过
-mvn verify deploy -Prelease   # 发布（打 v* 标签由 CI 触发）
-```
-
-本地起压测依赖容器：
-
-```bash
-docker run -d --name cache-kit-mysql -p 3307:3306 \
-  -e MYSQL_ROOT_PASSWORD=root -e MYSQL_DATABASE=cachekit_test \
-  mysql:8.4 --log-bin=mysql-bin --binlog-format=ROW --server-id=1
-```
+English: see [README_EN.md](README_EN.md)（topic docs 目前为中文）。
