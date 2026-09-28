@@ -65,6 +65,8 @@ class CacheStressComparisonIntegrationTest {
     private static final int PROPAGATION_ROUNDS = 100;
     /** 延迟采样比例：1/8，控制高吞吐档位的内存占用（分位数统计足够） */
     private static final int LATENCY_SAMPLE = 8;
+    /** 压测用 TTL 覆盖：UserEntity 实体级 TTL 只有 60s，跨阶段的压测必须压掉它 */
+    private static final java.time.Duration L2_TTL_OVERRIDE = java.time.Duration.ofMinutes(30);
 
     private static GenericContainer<?> redis;
     private static LettuceConnectionFactory sharedFactory;
@@ -264,7 +266,7 @@ class CacheStressComparisonIntegrationTest {
         TieredEntityCache l1Cache = cacheKit(new CaffeineChannel(10_000));
         for (long id = 1; id <= KEYS; id++) {
             final long fid = id;
-            l1Cache.load(meta, id, null, true, () -> new UserEntity(fid, "v" + fid));
+            l1Cache.load(meta, id, L2_TTL_OVERRIDE, true, () -> new UserEntity(fid, "v" + fid));
         }
         // ---- cache-kit 仅 L2（L1 bypass）：远程读路径对照，键与上一步相同 ----
         TieredEntityCache l2Only = cacheKit(alwaysMiss());
@@ -300,7 +302,7 @@ class CacheStressComparisonIntegrationTest {
 
         System.out.println("===== 场景1 并发读吞吐上限扫描（thr 从 cores/2 到 4×cores，每档 0.3s 预热 + 2s 计时） =====");
         StressResult kitL1 = sweep("cache-kit 三级(L1 命中)", pick,
-                id -> l1Cache.load(meta, id, null, true, () -> {
+                id -> l1Cache.load(meta, id, L2_TTL_OVERRIDE, true, () -> {
                     throw new AssertionError("不应回源");
                 }));
         StressResult jetMultiRes = sweep("JetCache 多级(Caffeine+Redis)", pick,
@@ -316,10 +318,58 @@ class CacheStressComparisonIntegrationTest {
             }
         });
         sweep("cache-kit 仅L2(单连接)", pick,
-                id -> l2Only.load(meta, id, null, true, () -> {
+                id -> l2Only.load(meta, id, L2_TTL_OVERRIDE, true, () -> {
                     throw new AssertionError("不应回源");
                 }));
         sweep("裸 Redis GET(池8)", pick, id -> pooledTemplate.opsForValue().get("stress:raw:" + id));
+
+        // ================= 场景 1b：工作集超出 L1（含水量校准） =================
+        // L1 容量压到 100（1000 键装不下）时，吞吐由命中率支配：命中走 ~430ns 内存路径，
+        // 未命中走 Redis 往返。均匀分布 vs Zipf 热点给出两种典型生产形态的下限参照。
+        System.out.println("===== 场景1b 工作集超出 L1（L1 容量 100 / 1000 键，" + cores * 2 + " 线程）——吞吐由命中率支配 =====");
+        IntUnaryOperator zipfPick = i -> (int) (KEYS * Math.pow(hash01(i), 3)) + 1;
+        // UserEntity 是 @CacheEntity(ttl=60)——实体级 TTL 60s：先各自预热回填 L2，
+        // 并在 2s 计时窗口内完成压测，避免 L2 过期混入回源（曾因此误判 L2 空）
+        TieredEntityCache uniformSmall = cacheKit(new CaffeineChannel(100));
+        HitRateRecorder uniformRate = new HitRateRecorder();
+        uniformSmall.setMetricsListener(uniformRate);
+        for (long id = 1; id <= KEYS; id++) {
+            final long fid = id;
+            uniformSmall.load(meta, id, L2_TTL_OVERRIDE, true, () -> new UserEntity(fid, "v" + fid));
+        }
+        AtomicInteger uLoader = new AtomicInteger();
+        StressResult rUniform = runConcurrent(cores * 2, pick, id -> {
+            Object v = uniformSmall.load(meta, id, L2_TTL_OVERRIDE, true, () -> {
+                uLoader.incrementAndGet();
+                return new UserEntity((long) id, "v" + id);
+            });
+            if (v == null) {
+                throw new AssertionError("L2 应命中且非 null");
+            }
+        });
+        assertThat(uLoader.get()).as("压测窗口内不应回源（L2 TTL 未过期）").isZero();
+        System.out.printf("ROW|%-34s|%12.0f ops/s|L1 命中率 %5.1f %%|n", "混合命中·均匀分布(L1=100)",
+                rUniform.opsPerSec(), uniformRate.rate() * 100);
+        TieredEntityCache zipfSmall = cacheKit(new CaffeineChannel(100));
+        HitRateRecorder zipfRate = new HitRateRecorder();
+        zipfSmall.setMetricsListener(zipfRate);
+        for (long id = 1; id <= KEYS; id++) {
+            final long fid = id;
+            zipfSmall.load(meta, id, L2_TTL_OVERRIDE, true, () -> new UserEntity(fid, "v" + fid));
+        }
+        AtomicInteger zLoader = new AtomicInteger();
+        StressResult rZipf = runConcurrent(cores * 2, zipfPick, id -> {
+            Object v = zipfSmall.load(meta, id, L2_TTL_OVERRIDE, true, () -> {
+                zLoader.incrementAndGet();
+                return new UserEntity((long) id, "v" + id);
+            });
+            if (v == null) {
+                throw new AssertionError("L2 应命中且非 null");
+            }
+        });
+        assertThat(zLoader.get()).as("压测窗口内不应回源").isZero();
+        System.out.printf("ROW|%-34s|%12.0f ops/s|L1 命中率 %5.1f %%|n", "混合命中·Zipf 热点(L1=100)",
+                rZipf.opsPerSec(), zipfRate.rate() * 100);
 
         // ================= 场景 2：单冷键击穿 =================
         int stormThreads = Math.max(200, cores * 4);
@@ -327,7 +377,7 @@ class CacheStressComparisonIntegrationTest {
         // 每行独立键空间与独立缓存实例（主线程构建、线程共享——single-flight/防穿透都是实例内语义）
         TieredEntityCache stormCache = cacheKit(new CaffeineChannel(10_000));
         storm("cache-kit single-flight", stormThreads, 901_000, loads ->
-                stormCache.load(meta, 901_000, null, true, () -> fakeDb(loads, 901_000L, FAKE_DB_MILLIS)));
+                stormCache.load(meta, 901_000, L2_TTL_OVERRIDE, true, () -> fakeDb(loads, 901_000L, FAKE_DB_MILLIS)));
         storm("Spring Cache(默认)", stormThreads, 902_000, loads ->
                 spring.get(902_000, () -> fakeDb(loads, 902_000L, FAKE_DB_MILLIS)));
         RedisClient jetClient2 = RedisClient.create("redis://" + redis.getHost() + ":" + redis.getMappedPort(6379));
@@ -363,7 +413,7 @@ class CacheStressComparisonIntegrationTest {
         int csThreads = cores * 4;
         TieredEntityCache csCache = cacheKit(new CaffeineChannel(10_000));
         stormMulti("cache-kit", csThreads, 920_000, COLD_START_KEYS, (key, loads) ->
-                csCache.load(meta, key, null, true, () -> fakeDb(loads, key, COLD_START_DB_MILLIS)));
+                csCache.load(meta, key, L2_TTL_OVERRIDE, true, () -> fakeDb(loads, key, COLD_START_DB_MILLIS)));
         stormMulti("Spring Cache(默认)", csThreads, 930_000, COLD_START_KEYS, (key, loads) ->
                 spring.get(key, () -> fakeDb(loads, key, COLD_START_DB_MILLIS)));
         stormMulti("JetCache(默认)", csThreads, 940_000, COLD_START_KEYS, (key, loads) -> {
@@ -545,6 +595,27 @@ class CacheStressComparisonIntegrationTest {
                 } catch (Exception ignored) {
                 }
             }
+        }
+    }
+
+    private static double hash01(int i) {
+        long h = (i * 2654435761L) & 0xFFFFFFFFL;
+        return h / 4294967296.0;
+    }
+
+    /** L1 命中率采样：混合命中场景用 */
+    private static final class HitRateRecorder implements CacheMetricsListener {
+        final AtomicLong hit = new AtomicLong();
+        final AtomicLong miss = new AtomicLong();
+
+        @Override
+        public void l1Lookup(boolean h) {
+            (h ? hit : miss).incrementAndGet();
+        }
+
+        double rate() {
+            long t = hit.get() + miss.get();
+            return t == 0 ? 0 : (double) hit.get() / t;
         }
     }
 

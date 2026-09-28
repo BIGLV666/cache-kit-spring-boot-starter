@@ -177,6 +177,30 @@ class CacheHitPathAttributionTest {
                 throw new AssertionError();
             }
         }));
+
+        // F) 每次命中的堆分配量（ThreadMXBean）：支撑 64 线程回落归因——
+        //    分配率 × 吞吐 = GC 压力，用于判断回落是否由 GC 主导
+        com.sun.management.ThreadMXBean mx =
+                (com.sun.management.ThreadMXBean) java.lang.management.ManagementFactory.getThreadMXBean();
+        long tid = Thread.currentThread().getId();
+        for (int i = 0; i < 100_000; i++) {
+            l1Cache.load(meta, 1L, null, true, () -> {
+                throw new AssertionError();
+            });
+        }
+        long before = mx.getThreadAllocatedBytes(tid);
+        for (int i = 0; i < 1_000_000; i++) {
+            l1Cache.load(meta, 1L, null, true, () -> {
+                throw new AssertionError();
+            });
+        }
+        long kitPerOp = (mx.getThreadAllocatedBytes(tid) - before) / 1_000_000;
+        before = mx.getThreadAllocatedBytes(tid);
+        for (int i = 0; i < 1_000_000; i++) {
+            jetMulti.get(1L);
+        }
+        long jetPerOp = (mx.getThreadAllocatedBytes(tid) - before) / 1_000_000;
+        System.out.printf("ROW|F 堆分配/命中|cache-kit %d B/op|JetCache 多级 %d B/op%n", kitPerOp, jetPerOp);
     }
 
     private static String json(long id) {
