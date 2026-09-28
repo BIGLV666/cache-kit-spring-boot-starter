@@ -34,22 +34,50 @@
 
 单实例（无 L1 一致性需求）或可容忍秒级 TTL 兜底时用默认 pubsub；多实例且对"重启窗口丢失效"敏感时用 streams。
 
-## 读路径对比 benchmark（0.3.1+）
+## 压测对比：cache-kit vs Spring Cache vs JetCache（0.3.1+）
 
-`CacheBenchmarkIntegrationTest`（Testcontainers redis:7，单线程、非 JMH，1000 键轮转，量级参考）：
+`CacheStressComparisonIntegrationTest`（Testcontainers redis:7，16/50 并发，1000 键轮转）。
+对比对象均取各自生产典型配置：Spring Cache = RedisCacheManager + Lettuce 连接池（8）+ JSON 序列化；
+JetCache = RedisLettuceCache（多级档为 Caffeine+Redis）。数值随环境波动，**量级与相对关系**才是重点。
 
-| 读路径 | ops/s |
-|---|---|
-| cache-kit L1 命中 | ~1,040,000 |
-| cache-kit L2 命中（Redis GET + 反序列化） | ~1,380 |
-| cache-kit miss→回源（no-op 通道 + 序列化） | ~1,040,000 |
-| 裸 Redis GET（StringRedisTemplate） | ~1,420 |
-| Spring Cache（RedisCacheManager，JSON 序列化） | ~1,310 |
-| JetCache（RedisLettuceCache） | ~1,300 |
+### 场景 1：并发读吞吐（16 线程 × 3s）
 
-L2 命中与裸 Redis/Spring Cache/JetCache 同为一个 Redis 往返量级——组件价值在**L1 挡掉绝大部分 Redis 往返**
-与失效链路，而非让单次 Redis 读更快。实测于 Windows 11 / Docker Desktop / JDK 21，数值随环境波动，
-复现：`mvn test -Dtest=CacheBenchmarkIntegrationTest`。
+| 实现 | ops/s | p50 | p99 |
+|---|---|---|---|
+| cache-kit 三级（L1 命中） | ~740 万 | <1µs | 5µs |
+| JetCache 多级（Caffeine+Redis） | ~520 万 | <1µs | 82µs |
+| Spring Cache（仅 Redis，池 8） | ~1.5 万 | ~976µs | ~2.9ms |
+| JetCache 仅远程 | ~1.6 万 | ~912µs | ~1.9ms |
+| cache-kit 仅 L2（单连接） | ~1.75 万 | ~862µs | ~1.7ms |
+| 裸 Redis GET（池 8） | ~1.7 万 | ~874µs | ~1.8ms |
+
+本地缓存命中与远程读相差 **2~3 个数量级**；仅远程各实现同为一次 Redis 往返量级，彼此相近——
+三级架构的价值在于**本地层挡掉绝大部分往返**，而不是远程读更快。
+
+### 场景 2：缓存击穿（50 并发打同一冷键，模拟 50ms DB）
+
+| 实现 | DB 回源次数 | 总耗时 |
+|---|---|---|
+| cache-kit（single-flight 内置） | **1** | ~57ms |
+| Spring Cache（默认，无互斥） | 50 | ~90ms |
+| JetCache（默认） | 50 | ~81ms |
+| JetCache（penetrationProtect=true） | **1** | ~64ms |
+
+cache-kit 的 single-flight 与 null 占位是**默认开启**的；JetCache 需显式开启 penetrationProtect，
+Spring Cache 需自行加锁或换 locking writer，否则击穿时回源次数 = 并发数。
+
+### 场景 3：单键失效传播（A 实例 evict → B 实例 L1 清除，100 轮）
+
+| 通道 | p50 | p99 | max |
+|---|---|---|---|
+| cache-kit pubsub | ~8.2ms | ~50ms | ~50ms |
+| cache-kit streams | ~8.2ms | ~22ms | ~22ms |
+
+跨实例失效在**几十毫秒级**完成；JetCache 的跨实例本地缓存失效依赖其 CacheManager 广播装配
+（本压测未含），Spring Cache 无本地层、天然无此问题但每次读都付 Redis 往返（见场景 1）。
+
+复现：`mvn test -Dtest=CacheStressComparisonIntegrationTest`（另有单线程微基准
+`CacheBenchmarkIntegrationTest` 可作量级参考）。
 
 ## 生产实测（PaperWise 宿主项目）
 

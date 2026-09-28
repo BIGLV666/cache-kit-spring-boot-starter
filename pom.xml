@@ -124,6 +124,12 @@
             <version>2.7.7</version>
             <scope>test</scope>
         </dependency>
+        <!-- 压测对比：Lettuce 连接池行需要（Boot BOM 管版本） -->
+        <dependency>
+            <groupId>org.apache.commons</groupId>
+            <artifactId>commons-pool2</artifactId>
+            <scope>test</scope>
+        </dependency>
         <dependency>
             <groupId>org.testcontainers</groupId>
             <artifactId>mysql</artifactId>
