@@ -60,6 +60,9 @@ jobs:
           EOF
 
       - name: Test, sign and publish
-        # 单目标 deploy：`verify deploy` 双目标会触发 central-publishing 的执行计划重算，
-        # 使构建跑两遍（source/javadoc attach 重复报 "duplicated artifacts attached"）
-        run: mvn -B -ntp deploy -Dgpg.passphrase=${{ secrets.GPG_PASSPHRASE }}
+        # 三个关键点（缺一发布必败）：
+        # 1) -Prelease：dev profile 默认 gpg.skip=true（本地开发不签名），不激活 release 则签名被静默跳过
+        # 2) 单目标 deploy：`verify deploy` 双目标会触发 central-publishing 执行计划重算跑两遍，
+        #    source/javadoc attach 重复报 "duplicated artifacts attached"
+        # 3) passphrase 由 release profile + 命令行双路提供
+        run: mvn -B -ntp deploy -Prelease -Dgpg.passphrase=${{ secrets.GPG_PASSPHRASE }}
