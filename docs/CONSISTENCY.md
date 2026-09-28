@@ -36,50 +36,66 @@
 
 ## 压测对比：cache-kit vs Spring Cache vs JetCache（0.3.1+）
 
-`CacheStressComparisonIntegrationTest`（Testcontainers redis:7，16/50 并发，1000 键轮转）。
+`CacheStressComparisonIntegrationTest`（Testcontainers redis:7，16 逻辑核机器）。
 对比对象均取各自生产典型配置：Spring Cache = RedisCacheManager + Lettuce 连接池（8）+ JSON 序列化；
 JetCache = RedisLettuceCache（多级档为 Caffeine+Redis）。数值随环境波动，**量级与相对关系**才是重点。
 
-### 场景 1：并发读吞吐（16 线程 × 3s）
+术语：**op = 一次读缓存调用**（cache-kit `load` / Spring Cache `get` / JetCache `get`），
+ops/s 为每秒完成的读调用次数（多线程聚合值）。
 
-| 实现 | ops/s | p50 | p99 |
+### 场景 1：并发读吞吐上限（线程数从 cores/2 扫到 4×cores，每档 0.3s 预热 + 2s 计时，取最优档）
+
+| 实现 | 吞吐上限 | 最优并发 | p99 @最优 |
 |---|---|---|---|
-| cache-kit 三级（L1 命中） | ~740 万 | <1µs | 5µs |
-| JetCache 多级（Caffeine+Redis） | ~520 万 | <1µs | 82µs |
-| Spring Cache（仅 Redis，池 8） | ~1.5 万 | ~976µs | ~2.9ms |
-| JetCache 仅远程 | ~1.6 万 | ~912µs | ~1.9ms |
-| cache-kit 仅 L2（单连接） | ~1.75 万 | ~862µs | ~1.7ms |
-| 裸 Redis GET（池 8） | ~1.7 万 | ~874µs | ~1.8ms |
+| cache-kit 三级（L1 命中） | **~1485 万 ops/s** | 32 线程 | ~1µs |
+| JetCache 多级（Caffeine+Redis） | ~683 万 ops/s | 32 线程 | ~177µs |
+| Spring Cache（仅 Redis，池 8） | ~2.5 万 ops/s | 32 线程 | ~2.8ms |
+| JetCache 仅远程 | ~2.8 万 ops/s | 64 线程 | ~4.9ms |
+| cache-kit 仅 L2（单连接） | ~2.7 万 ops/s | 64 线程 | ~5.3ms |
+| 裸 Redis GET（池 8） | ~2.8 万 ops/s | 64 线程 | ~4.8ms |
 
-本地缓存命中与远程读相差 **2~3 个数量级**；仅远程各实现同为一次 Redis 往返量级，彼此相近——
+有本地层的实现上限高出 **~550 倍**；仅远程各实现同为"Redis 往返 + 连接池"瓶颈，彼此相近——
 三级架构的价值在于**本地层挡掉绝大部分往返**，而不是远程读更快。
 
 **归因说明（别过度解读上一行）**：cache-kit 的 L1 存 JSON 串、每次命中都反序列化出**独立实例**
 （防共享可变对象被业务污染），单次命中成本其实**更高**。单线程逐段实测
 （`CacheHitPathAttributionTest`，中位数）：纯 Caffeine get ~100ns、Jackson 反序列化 ~200ns、
 cache-kit load 命中全路径 ~300ns（mean 430ns）、JetCache 本地 get ~100ns（mean 149ns）。
-16 线程下 cache-kit 聚合吞吐反超，来自 JetCache 多级路径在多线程下的尾延迟劣化
-（p99 82µs vs 5µs）——即并发扩展性差异，不是单次读更快。本地命中层两者同属
-亚微秒~微秒档，**该行差异不构成选型依据**；真正的分野是有无本地层（2~3 个数量级）与默认防击穿（场景 2）。
+多线程聚合吞吐 cache-kit 反超且扩展更平（8→32 线程 981 万→1486 万，64 线程开始回落；
+JetCache 多级 8 线程即到顶 645 万，线程加倍吞吐不动、p99 从 34µs 恶化到 396µs）——
+这是并发扩展性差异，不是单次读更快。本地命中层两者同属亚微秒~微秒档，
+**该行差异不构成选型依据**；真正的分野是有无本地层（~550 倍）与默认防击穿（场景 2）。
 
-### 场景 2：缓存击穿（50 并发打同一冷键，模拟 50ms DB）
+### 场景 2：缓存击穿（200 并发打同一冷键，模拟 50ms DB）
 
 | 实现 | DB 回源次数 | 总耗时 |
 |---|---|---|
-| cache-kit（single-flight 内置） | **1** | ~57ms |
-| Spring Cache（默认，无互斥） | 50 | ~90ms |
-| JetCache（默认） | 50 | ~81ms |
-| JetCache（penetrationProtect=true） | **1** | ~64ms |
+| cache-kit（single-flight 内置） | **1** | ~70ms |
+| Spring Cache（默认，无互斥） | 200 | ~175ms |
+| JetCache（默认） | 200 | ~143ms |
+| JetCache（penetrationProtect=true） | **1** | ~66ms |
 
 cache-kit 的 single-flight 与 null 占位是**默认开启**的；JetCache 需显式开启 penetrationProtect，
 Spring Cache 需自行加锁或换 locking writer，否则击穿时回源次数 = 并发数。
+
+### 场景 2b：冷启动回源放大（64 并发 × 100 冷键，每线程顺序请求全部键，模拟 20ms DB）
+
+| 实现 | DB 总回源次数 | 相对倍数 | 总耗时 |
+|---|---|---|---|
+| cache-kit | **100**（每键 1 次） | 1× | ~3.1s |
+| JetCache（penetrationProtect=true） | **100** | 1× | ~2.8s |
+| Spring Cache（默认） | 6,287 | ~63× | ~3.0s |
+| JetCache（默认） | 6,400 | ~64× | ~3.0s |
+
+应用重启/缓存清空后首批流量是回源峰值：无单飞语义的实现，DB 承压 ≈ 并发 × 键数；
+single-flight 把每键收敛为 1 次回源，DB 承压 ≈ 键数。
 
 ### 场景 3：单键失效传播（A 实例 evict → B 实例 L1 清除，100 轮）
 
 | 通道 | p50 | p99 | max |
 |---|---|---|---|
-| cache-kit pubsub | ~8.2ms | ~50ms | ~50ms |
-| cache-kit streams | ~8.2ms | ~22ms | ~22ms |
+| cache-kit pubsub | ~8.2ms | ~45ms | ~45ms |
+| cache-kit streams | ~8.8ms | ~22ms | ~22ms |
 
 跨实例失效在**几十毫秒级**完成；JetCache 的跨实例本地缓存失效依赖其 CacheManager 广播装配
 （本压测未含），Spring Cache 无本地层、天然无此问题但每次读都付 Redis 往返（见场景 1）。
