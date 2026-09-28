@@ -46,6 +46,7 @@ public class CacheKitProperties {
     private final Mp mp = new Mp();
     private final Binlog binlog = new Binlog();
     private final Tx tx = new Tx();
+    private final Warmup warmup = new Warmup();
 
     public boolean isEnabled() {
         return enabled;
@@ -73,6 +74,10 @@ public class CacheKitProperties {
 
     public Mp getMp() {
         return mp;
+    }
+
+    public Warmup getWarmup() {
+        return warmup;
     }
 
     public Binlog getBinlog() {
@@ -313,6 +318,30 @@ public class CacheKitProperties {
 
         public void setStreamsMaxlen(int streamsMaxlen) {
             this.streamsMaxlen = streamsMaxlen;
+        }
+    }
+
+    /** 启动预热配置 */
+    public static class Warmup {
+        /** 是否执行 @CacheWarmup 预热方法 */
+        private boolean enabled = true;
+        /** 预热线程并行度：1 为顺序执行；>1 时同 order 的方法并发执行 */
+        private int parallelism = 1;
+
+        public boolean isEnabled() {
+            return enabled;
+        }
+
+        public void setEnabled(boolean enabled) {
+            this.enabled = enabled;
+        }
+
+        public int getParallelism() {
+            return parallelism;
+        }
+
+        public void setParallelism(int parallelism) {
+            this.parallelism = parallelism;
         }
     }
 

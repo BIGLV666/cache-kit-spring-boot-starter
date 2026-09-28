@@ -1,6 +1,6 @@
 package io.github.biglv666.cachekit.core;
 
-import io.github.biglv666.cachekit.channel.CaffeineChannel;
+import io.github.biglv666.cachekit.channel.CacheChannel;
 import io.github.biglv666.cachekit.metadata.EntityMetadataRegistry;
 import org.springframework.data.redis.connection.Message;
 import org.springframework.data.redis.connection.MessageListener;
@@ -16,11 +16,11 @@ public class InvalidationSubscriber implements MessageListener {
 
     private final BroadcastApplier applier;
 
-    public InvalidationSubscriber(CaffeineChannel l1, EntityMetadataRegistry registry) {
+    public InvalidationSubscriber(CacheChannel l1, EntityMetadataRegistry registry) {
         this(l1, registry, "");
     }
 
-    public InvalidationSubscriber(CaffeineChannel l1, EntityMetadataRegistry registry, String namespace) {
+    public InvalidationSubscriber(CacheChannel l1, EntityMetadataRegistry registry, String namespace) {
         this.applier = new BroadcastApplier(l1, registry, namespace);
     }
 

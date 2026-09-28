@@ -10,7 +10,7 @@ import java.time.Duration;
  * L1 本地缓存通道（Caffeine）：每键独立 TTL（创建时生效，非滑动过期），
  * 统一存储 JSON 字符串，避免直接缓存可变对象实例被调用方污染。
  */
-public class CaffeineChannel implements CacheChannel {
+public class CaffeineChannel implements L1Channel {
 
     /** 槽位：JSON 值 + 创建时记录的 TTL，供 Caffeine Expiry 读取 */
     private record Slot(String json, long ttlNanos) {

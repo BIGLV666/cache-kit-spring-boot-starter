@@ -23,11 +23,15 @@ import java.lang.annotation.Target;
  * }
  * }</pre>
  *
- * <p>多个预热方法按 Bean 定义顺序依次执行；单个方法抛异常只告警，不影响其他预热与启动。
- * 可用 {@code cache-kit.warmup.enabled=false} 关闭（默认开）。</p>
+ * <p>多个预热方法按 {@link #order()} 升序执行（同序按 Bean 定义顺序），默认并行度 1（顺序执行）；
+ * 单个方法抛异常只告警，不影响其他预热与启动。可用 {@code cache-kit.warmup.enabled=false} 关闭
+ * （默认开），{@code cache-kit.warmup.parallelism} 控制并发度。</p>
  */
 @Documented
 @Target(ElementType.METHOD)
 @Retention(RetentionPolicy.RUNTIME)
 public @interface CacheWarmup {
+
+    /** 执行顺序（升序，小者先执行），同序按 Bean 定义顺序 */
+    int order() default 0;
 }

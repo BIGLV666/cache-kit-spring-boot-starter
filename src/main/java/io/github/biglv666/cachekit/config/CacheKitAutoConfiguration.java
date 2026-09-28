@@ -8,7 +8,9 @@ import io.github.biglv666.cachekit.aspect.MybatisPlusAutoCacheAspect;
 import io.github.biglv666.cachekit.aspect.MybatisPlusServiceCacheAspect;
 import io.github.biglv666.cachekit.BinlogLifecycle;
 import io.github.biglv666.cachekit.binlog.BinlogInvalidationListener;
+import io.github.biglv666.cachekit.channel.CacheChannel;
 import io.github.biglv666.cachekit.channel.CaffeineChannel;
+import io.github.biglv666.cachekit.channel.L1Channel;
 import io.github.biglv666.cachekit.channel.RedisChannel;
 import io.github.biglv666.cachekit.core.DoubleDeleteScheduler;
 import io.github.biglv666.cachekit.core.InvalidationPublisher;
@@ -45,10 +47,12 @@ import org.springframework.data.redis.listener.RedisMessageListenerContainer;
 @AutoConfiguration
 // 声明在 Redis 自动装配之后：让 @ConditionalOnBean(RedisConnectionFactory) 能看到它的 Bean
 //（用 name 形式避免 spring-data-redis 不在类路径时的类加载依赖）
-@AutoConfigureAfter(name = "org.springframework.boot.autoconfigure.data.redis.RedisAutoConfiguration")
+@AutoConfigureAfter(name = {"org.springframework.boot.autoconfigure.data.redis.RedisAutoConfiguration",
+        "org.springframework.boot.data.redis.autoconfigure.RedisAutoConfiguration"})
 @ConditionalOnClass(Caffeine.class)
 @ConditionalOnProperty(prefix = "cache-kit", name = "enabled", havingValue = "true", matchIfMissing = true)
 @EnableConfigurationProperties(CacheKitProperties.class)
+@org.springframework.context.annotation.ImportRuntimeHints(CacheKitRuntimeHints.class)
 public class CacheKitAutoConfiguration {
 
     private static final Logger log = LoggerFactory.getLogger(CacheKitAutoConfiguration.class);
@@ -103,12 +107,12 @@ public class CacheKitAutoConfiguration {
     }
 
     /**
-     * L1 通道默认实现（Caffeine）。当前版本 L1 不支持替换为其他本地缓存；
-     * L2 通道支持定义自定义 {@code RedisChannel} Bean 覆盖。
+     * L1 通道默认实现（Caffeine）。宿主可自定义 {@link L1Channel} Bean 替换为其他本地缓存
+     * （必须是进程内实现，广播失效只删本实例键）；L2 通道支持定义自定义 {@code RedisChannel} Bean 覆盖。
      */
     @Bean
-    @ConditionalOnMissingBean
-    public CaffeineChannel cacheKitL1Channel(CacheKitProperties props) {
+    @ConditionalOnMissingBean(L1Channel.class)
+    public L1Channel cacheKitL1Channel(CacheKitProperties props) {
         return new CaffeineChannel(props.getL1().getMaxEntries(), props.getL1().getMaxWeightKb());
     }
 
@@ -125,7 +129,7 @@ public class CacheKitAutoConfiguration {
     @ConditionalOnMissingBean
     public TieredEntityCache tieredEntityCache(CacheKitProperties props,
                                                EntityMetadataRegistry registry,
-                                               CaffeineChannel l1,
+                                               L1Channel l1,
                                                ObjectProvider<RedisChannel> l2,
                                                ObjectProvider<InvalidationPublisher> publisher,
                                                DoubleDeleteScheduler doubleDeleteScheduler,
@@ -142,8 +146,9 @@ public class CacheKitAutoConfiguration {
     @ConditionalOnMissingBean
     @ConditionalOnProperty(prefix = "cache-kit.warmup", name = "enabled", havingValue = "true", matchIfMissing = true)
     public io.github.biglv666.cachekit.warmup.CacheWarmupRunner cacheKitWarmupRunner(
-            org.springframework.context.ApplicationContext applicationContext) {
-        return new io.github.biglv666.cachekit.warmup.CacheWarmupRunner(applicationContext);
+            org.springframework.context.ApplicationContext applicationContext, CacheKitProperties props) {
+        return new io.github.biglv666.cachekit.warmup.CacheWarmupRunner(
+                applicationContext, props.getWarmup().getParallelism());
     }
 
     @Bean
@@ -241,7 +246,7 @@ public class CacheKitAutoConfiguration {
         @ConditionalOnProperty(prefix = "cache-kit.broadcast", name = "enabled",
                 havingValue = "true", matchIfMissing = true)
         public Object cacheKitInvalidationReceiver(RedisChannel l2Channel,
-                                                   CaffeineChannel l1Channel,
+                                                   L1Channel l1Channel,
                                                    EntityMetadataRegistry registry,
                                                    CacheKitProperties props,
                                                    ObjectProvider<io.github.biglv666.cachekit.core.CacheMetricsListener> metricsProvider) {
@@ -429,17 +434,16 @@ public class CacheKitAutoConfiguration {
         @Bean
         public com.github.shyiko.mysql.binlog.BinaryLogClient cacheKitBinlogClient(
                 CacheKitProperties props,
-                ObjectProvider<org.springframework.boot.autoconfigure.jdbc.DataSourceProperties> dsPropsProvider,
+                org.springframework.beans.factory.BeanFactory beanFactory,
                 ObjectProvider<javax.sql.DataSource> dataSourceProvider,
                 EntityMetadataRegistry registry,
                 TieredEntityCache tieredEntityCache,
                 ObjectProvider<io.github.biglv666.cachekit.core.CacheKeyCustomizer> keyCustomizers,
                 ObjectProvider<io.github.biglv666.cachekit.core.CacheMetricsListener> metricsProvider) {
             CacheKitProperties.Binlog binlog = props.getBinlog();
-            org.springframework.boot.autoconfigure.jdbc.DataSourceProperties dsProps =
-                    dsPropsProvider.getIfAvailable();
+            Object dsProps = DataSourcePropertiesReflection.resolve(beanFactory);
 
-            String url = dsProps != null ? dsProps.determineUrl() : null;
+            String url = DataSourcePropertiesReflection.determine(dsProps, "determineUrl");
             String host = binlog.getHost();
             Integer port = binlog.getPort();
             String database = binlog.getDatabase();
@@ -459,9 +463,9 @@ public class CacheKitAutoConfiguration {
                 database = database != null ? database : m.group(3);
             }
             String username = binlog.getUsername() != null ? binlog.getUsername()
-                    : (dsProps != null ? dsProps.determineUsername() : null);
+                    : DataSourcePropertiesReflection.determine(dsProps, "determineUsername");
             String password = binlog.getPassword() != null ? binlog.getPassword()
-                    : (dsProps != null ? dsProps.determinePassword() : null);
+                    : DataSourcePropertiesReflection.determine(dsProps, "determinePassword");
 
             BinlogInvalidationListener listener = new BinlogInvalidationListener(
                     tieredEntityCache, registry, dataSourceProvider.getIfAvailable(), database);
