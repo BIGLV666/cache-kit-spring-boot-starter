@@ -37,7 +37,7 @@ L2（Redis）与 MyBatis-Plus 适配按类路径自动启用。
 
 > 最小可跑示例：[cache-kit-sample](https://github.com/BIGLV666/cache-kit-sample)（docker compose 一键起
 > Redis + 带 binlog 的 MySQL，五条 curl 验证全部效果）。设计演进与压测对比见
-> [深度文章](docs/articles/cache-kit-deep-dive.md)。
+> [深度文章](docs/articles/cache-kit-deep-dive.md)（已发布：[掘金](https://juejin.cn/post/7690830871914332186) / [CSDN](https://blog.csdn.net/2502_94557984/article/details/166848452)）。
 
 ### MyBatis-Plus 项目（零注解）
 
