@@ -35,6 +35,10 @@
 要求 JDK 17+、Spring Boot 3.5.x（Boot 4 前向兼容，见 [docs/BOOT4-NATIVE.md](docs/BOOT4-NATIVE.md)）。
 L2（Redis）与 MyBatis-Plus 适配按类路径自动启用。
 
+> 最小可跑示例：[cache-kit-sample](https://github.com/BIGLV666/cache-kit-sample)（docker compose 一键起
+> Redis + 带 binlog 的 MySQL，五条 curl 验证全部效果）。设计演进与压测对比见
+> [深度文章](docs/articles/cache-kit-deep-dive.md)。
+
 ### MyBatis-Plus 项目（零注解）
 
 ```java

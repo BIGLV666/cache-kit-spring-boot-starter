@@ -43,6 +43,10 @@ Requires JDK 17+ and Spring Boot 3.5.x (Boot 4 forward-compatible, see
 [docs/BOOT4-NATIVE.md](docs/BOOT4-NATIVE.md), Chinese). L2 (Redis) and the MyBatis-Plus adapter
 are enabled automatically by classpath conditions.
 
+> Minimal runnable example: [cache-kit-sample](https://github.com/BIGLV666/cache-kit-sample)
+> (one `docker compose up` for Redis + binlog-enabled MySQL; five curl commands verify
+> every effect).
+
 ### MyBatis-Plus projects (zero annotations)
 
 ```java
