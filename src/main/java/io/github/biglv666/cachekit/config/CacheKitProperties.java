@@ -133,6 +133,17 @@ public class CacheKitProperties {
          */
         private Integer serverId;
 
+        /**
+         * GTID 模式（cache-kit.binlog.gtid-enabled）：用 GTID 集替代 file/position 定位位点。
+         * 主从切换后 file/position 失效而 GTID 仍连续，且 connector 内置
+         * gtidSetFallbackToPurged（位点被 PURGE 后自动回退最新）——生产高可用场景推荐。
+         * 未显式给 gtid-set 时启动时查询 @@global.gtid_executed 作为起点
+         * （connector 默认从最早可用事件回放历史，会造成启动失效风暴）。
+         */
+        private boolean gtidEnabled = false;
+        /** 初始 GTID 集（gtid-enabled=true 时生效）；缺省启动时以 @@global.gtid_executed 为起点 */
+        private String gtidSet;
+
         public boolean isEnabled() {
             return enabled;
         }
@@ -187,6 +198,22 @@ public class CacheKitProperties {
 
         public void setServerId(Integer serverId) {
             this.serverId = serverId;
+        }
+
+        public boolean isGtidEnabled() {
+            return gtidEnabled;
+        }
+
+        public void setGtidEnabled(boolean gtidEnabled) {
+            this.gtidEnabled = gtidEnabled;
+        }
+
+        public String getGtidSet() {
+            return gtidSet;
+        }
+
+        public void setGtidSet(String gtidSet) {
+            this.gtidSet = gtidSet;
         }
     }
 

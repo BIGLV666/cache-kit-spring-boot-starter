@@ -477,6 +477,19 @@ public class CacheKitAutoConfiguration {
                     ? binlog.getServerId()
                     : java.util.concurrent.ThreadLocalRandom.current().nextInt(1, Integer.MAX_VALUE));
             client.setKeepAlive(true);
+            if (binlog.isGtidEnabled()) {
+                String gtidSet = binlog.getGtidSet();
+                if (gtidSet == null || gtidSet.isBlank()) {
+                    // 未显式配置时以 @@global.gtid_executed 为起点：connector 在 GTID 模式下
+                    // 未设位点时默认从最早可用事件回放（历史失效风暴），起点必须显式确定
+                    gtidSet = queryCurrentGtidExecuted(dataSourceProvider.getIfAvailable());
+                }
+                client.setGtidSet(gtidSet);
+                // 位点被 PURGE 后由 connector 自动回退到最新 GTID 集继续监听
+                //（GTID 模式的兜底，与 file/position 模式的手动 5 轮重置互补）
+                client.setGtidSetFallbackToPurged(true);
+                log.info("cache-kit binlog 启用 GTID 模式（起点 {}）", gtidSet);
+            }
             client.registerEventListener(listener);
             if (keyCustomizers.stream().findAny().isPresent()) {
                 log.warn("cache-kit.binlog 与 CacheKeyCustomizer 同时启用存在已知限制：binlog 解析线程"
@@ -484,6 +497,33 @@ public class CacheKitAutoConfiguration {
                         + "多租户场景建议暂不启用 binlog。");
             }
             return client;
+        }
+
+        /**
+         * 查询当前 GTID 集作为 GTID 模式起点。宿主无数据源或 MySQL 未开 GTID 时 fail-fast——
+         * 静默落到 connector 默认行为（从最早可用事件回放）会造成启动失效风暴。
+         */
+        private static String queryCurrentGtidExecuted(javax.sql.DataSource dataSource) {
+            if (dataSource == null) {
+                throw new CacheKitException("cache-kit.binlog.gtid-enabled=true 但未配置 gtid-set，"
+                        + "且宿主无 DataSource 可查询 @@global.gtid_executed——"
+                        + "请显式配置 cache-kit.binlog.gtid-set");
+            }
+            try (java.sql.Connection conn = dataSource.getConnection();
+                 java.sql.Statement stmt = conn.createStatement();
+                 java.sql.ResultSet rs = stmt.executeQuery("SELECT @@global.gtid_executed")) {
+                if (rs.next()) {
+                    String gtid = rs.getString(1);
+                    if (gtid != null && !gtid.isBlank()) {
+                        return gtid;
+                    }
+                }
+                throw new CacheKitException("@@global.gtid_executed 为空——MySQL 未开启 GTID"
+                        + "（需 gtid_mode=ON），请开启或显式配置 cache-kit.binlog.gtid-set");
+            } catch (java.sql.SQLException e) {
+                throw new CacheKitException("查询 @@global.gtid_executed 失败（cache-kit.binlog.gtid-enabled=true"
+                        + " 需要 MySQL 开启 GTID 或显式配置 cache-kit.binlog.gtid-set）: " + e.getMessage(), e);
+            }
         }
 
         @Bean
