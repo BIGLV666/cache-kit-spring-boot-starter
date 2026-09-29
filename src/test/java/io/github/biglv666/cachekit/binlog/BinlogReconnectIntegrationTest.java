@@ -7,10 +7,7 @@ import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.Test;
 import org.mybatis.spring.annotation.MapperScan;
 import org.springframework.boot.autoconfigure.AutoConfigurations;
-import org.springframework.boot.autoconfigure.aop.AopAutoConfiguration;
-import org.springframework.boot.autoconfigure.data.redis.RedisAutoConfiguration;
-import org.springframework.boot.autoconfigure.jdbc.DataSourceAutoConfiguration;
-import org.springframework.boot.autoconfigure.jdbc.JdbcTemplateAutoConfiguration;
+import io.github.biglv666.cachekit.support.BootAutoconfigCompat;
 import org.springframework.boot.test.context.runner.ApplicationContextRunner;
 import org.springframework.context.annotation.Configuration;
 import org.springframework.jdbc.core.JdbcTemplate;
@@ -87,11 +84,11 @@ class BinlogReconnectIntegrationTest {
     private ApplicationContextRunner runner() {
         return new ApplicationContextRunner()
                 .withConfiguration(AutoConfigurations.of(
-                        DataSourceAutoConfiguration.class,
-                        JdbcTemplateAutoConfiguration.class,
+                        BootAutoconfigCompat.dataSource(),
+                        BootAutoconfigCompat.jdbcTemplate(),
                         MybatisPlusAutoConfiguration.class,
-                        RedisAutoConfiguration.class,
-                        AopAutoConfiguration.class,
+                        BootAutoconfigCompat.redis(),
+                        BootAutoconfigCompat.aop(),
                         CacheKitAutoConfiguration.class))
                 .withUserConfiguration(MappersConfig.class)
                 .withPropertyValues(

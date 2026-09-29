@@ -49,3 +49,33 @@ cache-kit:
 - `key-namespace` 未配置时自动取 `spring.application.name`；多服务共享 Redis 时必须保证命名空间隔离
 - L2 仅在类路径同时具备 spring-data-redis 类与 `RedisConnectionFactory` Bean 时启用
 - binlog 的 host/port/database/账号优先用显式配置，否则从 `spring.datasource.url`（Boot 3/4 双包名反射解析）回退
+
+## Redis 连接池与容量规划（生产必读）
+
+**为什么需要**：压测实测（`CacheStressComparisonIntegrationTest`）仅远程读路径的所有实现都顶在
+**~2.5~2.8 万 ops/s**——那是 Lettuce **单条共享连接**同步命令串行的上限，与缓存组件无关。
+生产 L2 QPS 需求超过该量级时必须开连接池：
+
+```yaml
+spring:
+  data:
+    redis:
+      timeout: 2s                    # 命令超时 1~5s（装配时 >5s 告警：抖动会把读线程阻塞到超时才降级）
+      lettuce:
+        pool:
+          enabled: true              # 需类路径有 commons-pool2（Boot 自动启用）
+          max-active: 8              # 连接数 ≈ 预期 L2 QPS / 1.5万，向上取整，一般 8~32
+          max-wait: 200ms            # 池耗尽等待上限：快速失败进入 L2 降级，而不是挂住业务线程
+```
+
+**容量估算三步**：
+
+1. **L2 承载量 = 业务 QPS × (1 - L1 命中率)**。例：1 万 QPS、L1 命中 95% → L2 只需扛 ~500 QPS（单连接就够）；
+   命中率掉到 60% → L2 要扛 4000 QPS（需要 1~2 条连接；留裕量配 4~8）。
+2. 每连接约 **1.5 万 ops/s**（本地 Redis 单线程实测），跨机房按 RTT 折算。
+3. 命中率（= L2 负载的第一变量）由 **L1 容量 / TTL / 访问倾斜**决定，见
+   [CONSISTENCY.md 场景 1b](CONSISTENCY.md#场景-1b工作集超出-l1l1-容量压到-100--1000-键32-线程吞吐由命中率支配)。
+
+**注意**：连接池解决吞吐，不解决尾延迟——`max-wait` 建议 ≤ 命令超时，保证池耗尽时快速进入
+L2 降级（按未命中处理，业务不阻塞）；批量化场景（`selectBatchIds`）走 MGET 管道，一次往返摊多键，
+对连接数需求远低于逐键读。

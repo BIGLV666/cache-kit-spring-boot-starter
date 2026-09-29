@@ -48,7 +48,7 @@ import org.springframework.data.redis.listener.RedisMessageListenerContainer;
 // 声明在 Redis 自动装配之后：让 @ConditionalOnBean(RedisConnectionFactory) 能看到它的 Bean
 //（用 name 形式避免 spring-data-redis 不在类路径时的类加载依赖）
 @AutoConfigureAfter(name = {"org.springframework.boot.autoconfigure.data.redis.RedisAutoConfiguration",
-        "org.springframework.boot.data.redis.autoconfigure.RedisAutoConfiguration"})
+        "org.springframework.boot.data.redis.autoconfigure.DataRedisAutoConfiguration"})
 @ConditionalOnClass(Caffeine.class)
 @ConditionalOnProperty(prefix = "cache-kit", name = "enabled", havingValue = "true", matchIfMissing = true)
 @EnableConfigurationProperties(CacheKitProperties.class)

@@ -1,5 +1,19 @@
 # 变更记录
 
+## 0.3.2（未发布）
+
+- **新增**：binlog GTID 位点模式（`cache-kit.binlog.gtid-enabled`）——GTID 集替代 file/position，
+  主从切换后位点仍连续；connector 内置 `gtidSetFallbackToPurged`（扫 PURGE 后自动回退）。
+  未显式配置 gtid-set 时启动查询 `@@global.gtid_executed` 为起点（connector 默认从最早事件回放
+  会造成启动失效风暴）；宿主无数据源或 MySQL 未开 GTID 时 fail-fast
+- **新增**：streams 消费组滞后 gauge（`cache-kit.broadcast.streams.lag.seconds`）——
+  本组已读事件与 Stream 最新事件的时间戳差，0 表示已追平；多实例测试断言"全部送达后回落为 0"
+- **修复**：`@AutoConfigureAfter` 的 Boot 4 Redis autoconfigure FQN 写错——Boot 4 的类名是
+  `DataRedisAutoConfiguration`（包名与类名都改了），修正后 Boot 4 下装配顺序条件真实生效
+- **验证**：新增 CI `boot4-compat` job——Spring Boot 4.0.0 依赖树下跑全部非容器测试（111 例全绿）；
+  测试套件经 `BootAutoconfigCompat` 反射双 FQN 探测，同一测试源码 Boot 3.5/4 双跑
+- **工程**：testcontainers 显式声明版本（Boot 4 parent 不再管理）
+
 ## 0.3.1（2026-09-29）
 
 - **修复**：`cache-kit.l2.ttl` 配置非正值（文档承诺的"禁用 L2 写入"）会被 L1/L2 TTL 倒装校验拦截导致启动失败——非正值时跳过倒装校验，仅告警

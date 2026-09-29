@@ -39,3 +39,23 @@ jobs:
         run: mvn -B test --file pom.xml
       - name: Install to local repo (verify packaging)
         run: mvn -B install -DskipTests -Dgpg.skip=true --file pom.xml
+
+  # Boot 4 前向兼容验证：4.0.0 依赖树下跑非集成全量（装配/切面/指标/binlog 生命周期等 111 例）。
+  # Boot 4 变化：spring-boot-starter-aop 被 spring-boot-starter-aspectj 取代；
+  # data.redis/jdbc autoconfigure 挪包（类名 Redis→DataRedis）——测试经 BootAutoconfigCompat 反射双 FQN。
+  boot4-compat:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Switch to Spring Boot 4.0.0
+        run: |
+          sed -i 's|<version>3.5.14</version>|<version>4.0.0</version>|' pom.xml
+          sed -i 's|<artifactId>spring-boot-starter-aop</artifactId>|<artifactId>spring-boot-starter-aspectj</artifactId>|' pom.xml
+      - name: Set up JDK 17
+        uses: actions/setup-java@v4
+        with:
+          java-version: '17'
+          distribution: 'temurin'
+          cache: maven
+      - name: Test (Boot 4, non-container suite)
+        run: mvn -B -ntp test --file pom.xml "-Dtest=!*IntegrationTest"

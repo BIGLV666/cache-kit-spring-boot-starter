@@ -1,6 +1,7 @@
 package io.github.biglv666.cachekit.config;
 
 import io.github.biglv666.cachekit.exception.CacheKitException;
+import io.github.biglv666.cachekit.support.BootAutoconfigCompat;
 import org.junit.jupiter.api.Test;
 import org.springframework.boot.autoconfigure.AutoConfigurations;
 import org.springframework.boot.test.context.runner.ApplicationContextRunner;
@@ -14,7 +15,7 @@ class CacheKitAutoConfigurationValidationTest {
 
     private final ApplicationContextRunner runner = new ApplicationContextRunner()
             .withConfiguration(AutoConfigurations.of(
-                    org.springframework.boot.autoconfigure.data.redis.RedisAutoConfiguration.class,
+                    BootAutoconfigCompat.redis(),
                     CacheKitAutoConfiguration.class))
             .withPropertyValues(
                     "spring.data.redis.host=localhost",
@@ -37,7 +38,7 @@ class CacheKitAutoConfigurationValidationTest {
     void correctTtlShouldStart() {
         new ApplicationContextRunner()
                 .withConfiguration(AutoConfigurations.of(
-                        org.springframework.boot.autoconfigure.data.redis.RedisAutoConfiguration.class,
+                        BootAutoconfigCompat.redis(),
                         CacheKitAutoConfiguration.class))
                 .withPropertyValues(
                         "spring.data.redis.host=localhost",
@@ -57,7 +58,7 @@ class CacheKitAutoConfigurationValidationTest {
         for (String ttl : new String[]{"0", "-1"}) {
             new ApplicationContextRunner()
                     .withConfiguration(AutoConfigurations.of(
-                            org.springframework.boot.autoconfigure.data.redis.RedisAutoConfiguration.class,
+                            BootAutoconfigCompat.redis(),
                             CacheKitAutoConfiguration.class))
                     .withPropertyValues(
                             "spring.data.redis.host=localhost",

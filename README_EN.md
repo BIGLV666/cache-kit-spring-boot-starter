@@ -8,7 +8,7 @@ An entity-metadata-driven three-tier cache: **Caffeine (L1) → Redis (L2) → D
 **Zero-annotation integration** for MyBatis-Plus users; direct binlog invalidation covers the blind
 spot of "writes that bypass your application"; consistency semantics are **eventually consistent** —
 typically sub-second (within the double-delete window), worst case bounded by the L2 TTL
-(see [mechanism & measurements](docs/CONSISTENCY.md), Chinese).
+(see [mechanism & measurements](docs/CONSISTENCY_EN.md)).
 
 ## Features
 
@@ -21,7 +21,7 @@ typically sub-second (within the double-delete window), worst case bounded by th
 - Multi-instance consistency: write-then-evict + invalidation broadcast (pub/sub or Streams
   consumer group) + delayed double delete
 - Direct binlog invalidation: DBA updates and other services' writes invalidate within seconds,
-  no Canal ([docs/BINLOG.md](docs/BINLOG.md), Chinese)
+  no Canal ([docs/BINLOG_EN.md](docs/BINLOG_EN.md))
 - `@CacheWarmup` startup warmup, `EntityCache` manual handle, pluggable `L1Channel` SPI
 - Observability: Micrometer counters / hit-rate gauges / propagation timer + Grafana dashboard
   ([docs/OBSERVABILITY.md](docs/OBSERVABILITY.md), Chinese)
@@ -120,12 +120,12 @@ Full reference: [docs/CONFIG.md](docs/CONFIG.md) (Chinese).
 
 ## Documentation
 
-Topic docs live under [`docs/`](docs/) and are currently written in Chinese:
+Topic docs live under [`docs/`](docs/). English versions available for the two most-read topics; the rest are currently Chinese:
 
 | Doc | Content |
 |---|---|
-| [docs/BINLOG.md](docs/BINLOG.md) | direct binlog invalidation: config, reconnect semantics, troubleshooting |
-| [docs/CONSISTENCY.md](docs/CONSISTENCY.md) | consistency mechanism, broadcast channel choice, benchmark, production measurements |
+| [docs/BINLOG_EN.md](docs/BINLOG_EN.md) | direct binlog invalidation: config, file/position vs GTID, reconnect semantics, troubleshooting |
+| [docs/CONSISTENCY_EN.md](docs/CONSISTENCY_EN.md) | consistency mechanism, broadcast channel choice, stress comparison, production measurements |
 | [docs/CONFIG.md](docs/CONFIG.md) | full configuration reference |
 | [docs/OBSERVABILITY.md](docs/OBSERVABILITY.md) | Micrometer metrics, alerting, Grafana dashboard |
 | [docs/RESILIENCE.md](docs/RESILIENCE.md) | resilience design: degradation, retries, backlog protection, security |
