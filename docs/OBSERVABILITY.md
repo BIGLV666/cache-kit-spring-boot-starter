@@ -19,6 +19,7 @@
 | `cache-kit.binlog.position.resets` | binlog 位点重置——**断连窗口内失效丢失**（位点被服务端清理时触发），建议告警 |
 | `cache-kit.l1.hit.rate` / `cache-kit.l2.hit.rate` | 命中率 Gauge（hit/(hit+miss)，由计数器实时计算） |
 | `cache-kit.invalidation.delay`（Timer，p50/p99） | binlog 行事件 MySQL 时间戳 → 本实例失效应用的传播延迟；**含两侧时钟偏差，趋势观测用** |
+| `cache-kit.broadcast.streams.lag.seconds`（Gauge） | streams 模式本实例消费组滞后（最新失效事件 - 本组已读事件的时间戳差）；持续 >0 说明消费方处理不过来或断连 |
 
 ## 告警建议
 

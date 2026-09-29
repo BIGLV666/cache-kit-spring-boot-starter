@@ -256,8 +256,11 @@ public class CacheKitAutoConfiguration {
                             l1Channel, registry, props.getKeyNamespace());
             applier.setMetricsListener(metricsProvider.getIfAvailable());
             if ("streams".equalsIgnoreCase(mode)) {
-                return new io.github.biglv666.cachekit.core.StreamsInvalidationConsumer(
-                        l2Channel.template(), applier, props.getBroadcast().getTopic());
+                io.github.biglv666.cachekit.core.StreamsInvalidationConsumer consumer =
+                        new io.github.biglv666.cachekit.core.StreamsInvalidationConsumer(
+                                l2Channel.template(), applier, props.getBroadcast().getTopic());
+                consumer.setMetricsListener(metricsProvider.getIfAvailable());
+                return consumer;
             }
             // pubsub（默认）
             RedisMessageListenerContainer container = new RedisMessageListenerContainer();

@@ -57,4 +57,11 @@ public interface CacheMetricsListener {
      */
     default void invalidationDelayMillis(long millis) {
     }
+
+    /**
+     * Streams 模式下本实例消费组的滞后（秒）：最新失效事件与本组已读到事件
+     * 的时间戳差，0 表示已追平。持续大于 0 说明消费方处理不过来或断连。
+     */
+    default void streamsLagSeconds(long seconds) {
+    }
 }

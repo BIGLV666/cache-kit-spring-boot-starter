@@ -41,6 +41,8 @@ public class StreamsInvalidationConsumer implements SmartLifecycle {
     private static final long RETRY_BACKOFF_MILLIS = 3_000;
     /** 悬空组清理扫描间隔（毫秒） */
     private static final long SWEEP_INTERVAL_MILLIS = 300_000;
+    /** 滞后量测节流间隔（毫秒）：避免每轮 BLOCK 空转时频繁 XINFO */
+    private static final long LAG_COMPUTE_INTERVAL_MILLIS = 2_000;
     /** 组纪元早于当前时间该毫秒数才允许清理（新组豁免） */
     private static final long GROUP_EPOCH_GRACE_MILLIS = 1_800_000L;
     /** 消费者闲置超过该毫秒数视为死亡（健康消费者闲置至多 BLOCK_MILLIS） */
@@ -54,6 +56,15 @@ public class StreamsInvalidationConsumer implements SmartLifecycle {
     private final AtomicLong lastWarnAt = new AtomicLong();
     private volatile boolean running;
     private Thread worker;
+    private long lastLagComputeAt;
+    private volatile CacheMetricsListener metrics = new CacheMetricsListener() {
+    };
+
+    /** 挂载指标监听器（消费组滞后 gauge 数据源） */
+    public void setMetricsListener(CacheMetricsListener metrics) {
+        this.metrics = metrics == null ? new CacheMetricsListener() {
+        } : metrics;
+    }
 
     public StreamsInvalidationConsumer(StringRedisTemplate template, BroadcastApplier applier, String stream) {
         this.template = template;
@@ -115,6 +126,10 @@ public class StreamsInvalidationConsumer implements SmartLifecycle {
                     ack(records);
                 }
                 long now = System.currentTimeMillis();
+                if (now - lastLagComputeAt >= LAG_COMPUTE_INTERVAL_MILLIS) {
+                    lastLagComputeAt = now;
+                    computeAndReportLag();
+                }
                 if (now - lastSweep > SWEEP_INTERVAL_MILLIS) {
                     lastSweep = now;
                     sweepStaleGroups();
@@ -126,6 +141,43 @@ public class StreamsInvalidationConsumer implements SmartLifecycle {
                 }
                 sleep(RETRY_BACKOFF_MILLIS);
             }
+        }
+    }
+
+    /**
+     * 滞后量测（节流 {@value LAG_COMPUTE_INTERVAL_MILLIS}ms）：
+     * 本组已读到事件（lastDeliveredId）与 Stream 最新事件（lastGeneratedId）的时间戳差。
+     * lastDelivered 为 null/"0-0"（组从未读到）时跳过——不更新 gauge，避免误报"已追平"。
+     */
+    private void computeAndReportLag() {
+        try {
+            String lastGenerated = template.opsForStream().info(stream).lastGeneratedId();
+            String lastDelivered = null;
+            for (StreamInfo.XInfoGroup g : template.opsForStream().groups(stream)) {
+                if (group.equals(g.groupName())) {
+                    lastDelivered = g.lastDeliveredId();
+                    break;
+                }
+            }
+            if (lastGenerated == null || lastDelivered == null || lastDelivered.startsWith("0-")) {
+                return;
+            }
+            long lag = parseStreamIdMillis(lastGenerated) - parseStreamIdMillis(lastDelivered);
+            if (lag >= 0) {
+                metrics.streamsLagSeconds(lag / 1000);
+            }
+        } catch (Exception e) {
+            debugOrWarn("消费组滞后计算失败（下轮重试）", e);
+        }
+    }
+
+    /** Stream ID "millis-seq" 的毫秒段 */
+    private static long parseStreamIdMillis(String recordId) {
+        int dash = recordId.indexOf('-');
+        try {
+            return dash > 0 ? Long.parseLong(recordId.substring(0, dash)) : Long.parseLong(recordId);
+        } catch (NumberFormatException e) {
+            return -1L;
         }
     }
 

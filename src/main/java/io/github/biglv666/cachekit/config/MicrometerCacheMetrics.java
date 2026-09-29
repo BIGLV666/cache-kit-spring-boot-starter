@@ -41,6 +41,7 @@ class MicrometerCacheMetrics implements CacheMetricsListener {
     private final Counter doubleDeleteSkipped;
     private final Counter binlogPositionResets;
     private final io.micrometer.core.instrument.Timer invalidationDelay;
+    private final java.util.concurrent.atomic.AtomicLong streamsLagSeconds = new java.util.concurrent.atomic.AtomicLong();
 
     MicrometerCacheMetrics(MeterRegistry registry) {
         this.registryRef = registry;
@@ -68,6 +69,11 @@ class MicrometerCacheMetrics implements CacheMetricsListener {
                 .register(registry);
         io.micrometer.core.instrument.Gauge.builder("cache-kit.l2.hit.rate", () -> hitRate(l2Hit, l2Miss))
                 .description("L2 命中率（hit / (hit+miss)）")
+                .register(registry);
+        // streams 模式消费组滞后：最新失效事件与本组已读到事件的时间戳差（秒）
+        io.micrometer.core.instrument.Gauge.builder("cache-kit.broadcast.streams.lag.seconds",
+                        streamsLagSeconds, java.util.concurrent.atomic.AtomicLong::get)
+                .description("Streams 消费组滞后（最新失效事件 - 本组已读事件的时间戳差）")
                 .register(registry);
     }
 
@@ -130,6 +136,11 @@ class MicrometerCacheMetrics implements CacheMetricsListener {
     @Override
     public void binlogPositionReset() {
         binlogPositionResets.increment();
+    }
+
+    @Override
+    public void streamsLagSeconds(long seconds) {
+        streamsLagSeconds.set(seconds);
     }
 
     @Override

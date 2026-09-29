@@ -130,7 +130,7 @@ class InvalidationBroadcastMultiInstanceIntegrationTest {
     }
 
     @Test
-    void streamsModeShouldDeliverToAllInstancesWithoutLoss() {
+    void streamsModeShouldDeliverToAllInstancesWithoutLoss() throws Exception {
         int instanceCount = 3;
         List<Instance> all = new ArrayList<>();
         // A（索引 0）持有 Streams 发布器；三个实例都挂消费者（真实拓扑）
@@ -141,11 +141,22 @@ class InvalidationBroadcastMultiInstanceIntegrationTest {
         }
         List<BroadcastApplier> appliers = new ArrayList<>();
         List<StreamsInvalidationConsumer> consumers = new ArrayList<>();
+        // 滞后 gauge 数据源：消费者节流回调
+        java.util.concurrent.atomic.AtomicInteger lagCalls = new java.util.concurrent.atomic.AtomicInteger();
+        java.util.concurrent.atomic.AtomicLong lastLag = new java.util.concurrent.atomic.AtomicLong(-1);
+        CacheMetricsListener lagProbe = new CacheMetricsListener() {
+            @Override
+            public void streamsLagSeconds(long seconds) {
+                lagCalls.incrementAndGet();
+                lastLag.set(seconds);
+            }
+        };
         for (Instance inst : all) {
             BroadcastApplier applier = new BroadcastApplier(inst.l1(), registry, "");
             appliers.add(applier);
             StreamsInvalidationConsumer consumer = new StreamsInvalidationConsumer(template, applier,
                     "cache-kit:test-stream");
+            consumer.setMetricsListener(lagProbe);
             consumer.start();
             consumers.add(consumer);
         }
@@ -163,6 +174,14 @@ class InvalidationBroadcastMultiInstanceIntegrationTest {
             System.out.printf("===== streams 多实例广播：%d 实例 × %d 键，送达 %d/%d，耗时 %dms =====%n",
                     instanceCount, STREAM_IDS, cleared, expected, elapsed);
             assertThat(cleared).as("其余实例 L1 必须全部清除（零丢失）").isEqualTo(expected);
+
+            // 消费追平后滞后应回落到 0（轮询等待节流回调出现）
+            long lagDeadline = System.currentTimeMillis() + 10_000;
+            while (lastLag.get() != 0 && System.currentTimeMillis() < lagDeadline) {
+                Thread.sleep(200);
+            }
+            assertThat(lagCalls.get()).as("滞后量测应被周期触发").isPositive();
+            assertThat(lastLag.get()).as("全部送达后消费组滞后应追平为 0").isEqualTo(0);
         } finally {
             consumers.forEach(StreamsInvalidationConsumer::stop);
         }
