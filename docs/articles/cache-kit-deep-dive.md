@@ -60,7 +60,7 @@ cache-kit 0.3.1 提供了第二条通道（`cache-kit.broadcast.mode=streams`）
 
 ### 一次有意思的根因排查：为什么 JetCache 多级缓存高并发下尾延迟劣化？
 
-压测里发现一个反直觉现象：JetCache 本地层存的是对象引用（cache-kit 存 JSON 串、每次命中还要 Jackson 反序列化出新实例），**单次命中明明 JetCache 更快**（实测 ~150ns vs ~430ns），但 16 线程以上它的聚合吞吐先到顶、p99 从 34µs 一路恶化到 400µs，而 cache-kit 反序列化做得更多，p99 反而稳在 1µs。
+压测里发现一个反直觉现象：JetCache 本地层存的是对象引用（cache-kit 存 JSON 串、每次命中还要 Jackson 反序列化出新实例），**单次命中明明 JetCache 更快**（单线程均值实测 ~166ns vs ~494ns），但 16 线程以上它的聚合吞吐先到顶、p99 从 35µs 一路恶化到 427µs，而 cache-kit 反序列化做得更多，p99 反而稳在 1µs。
 
 最后定位到实现细节：**JetCache 的 Caffeine 本地层为了支持 `expireAfterAccess` 语义用了自定义 `Expiry`——Caffeine 对这种策略每次读都会回调 `expireAfterRead`**，内部调 `System.currentTimeMillis()` 重算剩余时间，返回值随时间连续漂移，导致 Caffeine 对热点条目频繁重排定时器（共享写）。热键被几十个线程打，这些条目就在 CPU 核心之间来回弹。
 
