@@ -17,7 +17,7 @@
 - 多实例一致性：写后删缓存 + 失效广播（pub/sub 或 Streams 消费组）+ 延迟双删
 - binlog 直连失效：DBA 改库、其他服务写入也能秒级失效，无需 Canal（[文档](docs/BINLOG.md)）
 - `@CacheWarmup` 启动预热、`EntityCache` 手动句柄、`L1Channel` 可插拔 SPI
-- 可观测性：Micrometer 计数器/命中率 Gauge/传播延迟 Timer + Grafana 面板（[文档](docs/OBSERVABILITY.md)）
+- 可观测性：Micrometer 计数器/命中率 Gauge/传播延迟 Timer + Grafana 面板 + `/actuator/cachekit` 运维端点（实体级命中率、双删积压、消费组滞后、熔断状态；[文档](docs/OBSERVABILITY.md)）
 - 强一致读出口：`CacheKit.withDb(...)` 作用域旁路
 
 ## 快速开始
@@ -37,7 +37,8 @@ L2（Redis）与 MyBatis-Plus 适配按类路径自动启用。
 
 > 最小可跑示例：[cache-kit-sample](https://github.com/BIGLV666/cache-kit-sample)（docker compose 一键起
 > Redis + 带 binlog 的 MySQL，五条 curl 验证全部效果）。设计演进与压测对比见
-> [深度文章](docs/articles/cache-kit-deep-dive.md)（已发布：[掘金](https://juejin.cn/post/7690830871914332186) / [CSDN](https://blog.csdn.net/2502_94557984/article/details/166848452)）。
+> 深度文章《三级缓存的两个失效盲区，我用 binlog 和消费组广播补上了》（已发布：[掘金](https://juejin.cn/post/7690830871914332186) / [CSDN](https://blog.csdn.net/2502_94557984/article/details/166848452)）；
+> [Caffeine 源码详解](https://juejin.cn/post/7691207444282179618)（[CSDN](https://blog.csdn.net/2502_94557984/article/details/166940522)）。
 
 ### MyBatis-Plus 项目（零注解）
 
@@ -100,7 +101,11 @@ cache-kit:
   l2:
     ttl: 10m
   # broadcast:
-  #   mode: streams     # 多实例且对"重启窗口丢失效"敏感时启用（默认 pubsub）
+  #   mode: streams     # 多实例且对"重启窗口丢失效"敏感时启用（默认 pubsub）；
+  #                     # Redis Cluster 也可用 sharded-pubsub（分片广播，仅 Lettuce）
+  # l2:
+  #   circuit-breaker:
+  #     enabled: true   # L2 熔断器（默认开）：Redis 故障期间短路降级，免逐次阻塞到超时
   # binlog:
   #   enabled: true     # 覆盖"绕过应用的写"
 ```
@@ -114,7 +119,7 @@ cache-kit:
 | [docs/BINLOG.md](docs/BINLOG.md) | binlog 直连失效：配置、断线重连语义、排查 |
 | [docs/CONSISTENCY.md](docs/CONSISTENCY.md) | 一致性机制、广播通道选择（pubsub/streams）、对比 benchmark、生产实测 |
 | [docs/CONFIG.md](docs/CONFIG.md) | 配置全参考 |
-| [docs/OBSERVABILITY.md](docs/OBSERVABILITY.md) | Micrometer 指标、告警建议、Grafana 面板 |
+| [docs/OBSERVABILITY.md](docs/OBSERVABILITY.md) | Micrometer 指标、/actuator/cachekit 端点、告警建议、Grafana 面板 |
 | [docs/RESILIENCE.md](docs/RESILIENCE.md) | 稳健性设计：降级、重试、积压保护、安全边界 |
 | [docs/LIMITATIONS.md](docs/LIMITATIONS.md) | MVP 边界、已知限制、FAQ |
 | [docs/BOOT4-NATIVE.md](docs/BOOT4-NATIVE.md) | Spring Boot 4 兼容、GraalVM native-image |
