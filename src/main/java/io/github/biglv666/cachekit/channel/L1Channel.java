@@ -8,4 +8,12 @@ package io.github.biglv666.cachekit.channel;
  * 远端存储实现（把 L1 做成另一个 Redis）会导致广播语义失效，不要这样做。</p>
  */
 public interface L1Channel extends CacheChannel {
+
+    /**
+     * 当前条目数估计值（L1 淘汰异步进行，非精确值）；实现不支持时返回 -1。
+     * 供运维端点展示，不影响缓存语义。
+     */
+    default long estimatedSize() {
+        return -1;
+    }
 }

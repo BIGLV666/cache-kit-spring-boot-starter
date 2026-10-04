@@ -65,6 +65,33 @@ public class TieredEntityCache {
     private volatile CacheMetricsListener metrics = new CacheMetricsListener() {
     };
 
+    /** 实体维度统计收集器（端点数据源，可选）：与全局 metrics 并行记录 */
+    private volatile CacheStatsCollector stats;
+
+    /** 挂载实体维度统计收集器（/actuator/cachekit 数据源），未挂载时跳过统计 */
+    public void setStatsCollector(CacheStatsCollector stats) {
+        this.stats = stats;
+    }
+
+    /** 当前 single-flight 回源中的键数（观测用） */
+    public int inflightCount() {
+        return inflight.size();
+    }
+
+    private void statL1(EntityMetadata meta, boolean hit) {
+        CacheStatsCollector s = stats;
+        if (s != null) {
+            s.l1Lookup(meta.prefix(), hit);
+        }
+    }
+
+    private void statL2(EntityMetadata meta, boolean hit) {
+        CacheStatsCollector s = stats;
+        if (s != null) {
+            s.l2Lookup(meta.prefix(), hit);
+        }
+    }
+
     /** 挂载指标监听器（Micrometer 集成或自定义观测），未挂载时为空实现 */
     public void setMetricsListener(CacheMetricsListener metrics) {
         this.metrics = metrics == null ? new CacheMetricsListener() {
@@ -144,13 +171,14 @@ public class TieredEntityCache {
 
         CacheEntry c1 = l1.get(key);
         metrics.l1Lookup(c1.hit());
+        statL1(meta, c1.hit());
         Object v = c1.hit() ? decode(key, c1.json(), meta) : DECODE_FAILED;
         if (v != DECODE_FAILED) {
             return v == NULL_VALUE ? null : v;
         }
 
         if (l2 != null) {
-            CacheEntry c2 = l2Get(key);
+            CacheEntry c2 = l2Get(meta, key);
             metrics.l2Lookup(c2.hit());
             if (c2.hit()) {
                 v = decode(key, c2.json(), meta);
@@ -185,6 +213,10 @@ public class TieredEntityCache {
                             Duration nullTtl = props.getL2().getNullTtl();
                             putBoth(key, JsonCodec.NULL_SENTINEL, nullTtl, l1TtlFor(nullTtl));
                             metrics.nullPlaceholder();
+                            CacheStatsCollector ns = stats;
+                            if (ns != null) {
+                                ns.nullPlaceholder(meta.prefix());
+                            }
                         }
                         payload = cacheNull ? JsonCodec.NULL_SENTINEL : null;
                     } else {
@@ -205,6 +237,10 @@ public class TieredEntityCache {
                         }
                     }
                     metrics.dbLoad(1);
+                    CacheStatsCollector s = stats;
+                    if (s != null) {
+                        s.dbLoad(meta.prefix(), 1);
+                    }
                     created.complete(payload);
                     return db;
                 } catch (Throwable t) {
@@ -317,6 +353,10 @@ public class TieredEntityCache {
             try {
                 List<Object> fresh = dbBatchLoader.apply(ownedIds);
                 metrics.dbLoad(ownedIds.size());
+                CacheStatsCollector s = stats;
+                if (s != null) {
+                    s.dbLoad(meta.prefix(), ownedIds.size());
+                }
                 Map<String, Object> freshByKey = new LinkedHashMap<>();
                 for (Object entity : fresh) {
                     Object idValue = meta.idOf(entity);
@@ -374,6 +414,10 @@ public class TieredEntityCache {
                             Duration nullTtl = props.getL2().getNullTtl();
                             putBoth(keys[ownedIdx.get(i)], JsonCodec.NULL_SENTINEL, nullTtl, l1TtlFor(nullTtl));
                             metrics.nullPlaceholder();
+                            CacheStatsCollector ns = stats;
+                            if (ns != null) {
+                                ns.nullPlaceholder(meta.prefix());
+                            }
                         }
                         payload = cacheNull && !misfired ? JsonCodec.NULL_SENTINEL : null;
                     }
@@ -420,6 +464,30 @@ public class TieredEntityCache {
         evictKeys(keys, 0);
         if (doubleDeleteScheduler != null && !keys.isEmpty()) {
             doubleDeleteScheduler.schedule(() -> evictKeys(keys, 0));
+        }
+        CacheStatsCollector s = stats;
+        if (s != null && !keys.isEmpty()) {
+            s.evict(meta.prefix(), keys.size());
+        }
+    }
+
+    /**
+     * 失效调用方（binlog 键段还原路径）预先拼好的完整键：键已含自定义段与命名空间，
+     * 不经过 {@link #key} 组装（binlog 解析线程没有应用上下文，{@code segment()} 拿不到段）。
+     * 语义与 {@link #evictBatch} 一致：逐键立即删除 + 广播 + 整批一次延迟双删，键先去重。
+     */
+    public void evictExactKeys(Iterable<String> keys) {
+        if (keys == null) {
+            return;
+        }
+        Set<String> deduped = new LinkedHashSet<>();
+        keys.forEach(deduped::add);
+        if (deduped.isEmpty()) {
+            return;
+        }
+        evictKeys(deduped, 0);
+        if (doubleDeleteScheduler != null) {
+            doubleDeleteScheduler.schedule(() -> evictKeys(deduped, 0));
         }
     }
 
@@ -474,11 +542,12 @@ public class TieredEntityCache {
         String key = key(meta, id);
         CacheEntry c1 = l1.get(key);
         metrics.l1Lookup(c1.hit());
+        statL1(meta, c1.hit());
         if (c1.hit()) {
             return toPeek(decode(key, c1.json(), meta));
         }
         if (l2 != null) {
-            CacheEntry c2 = l2Get(key);
+            CacheEntry c2 = l2Get(meta, key);
             metrics.l2Lookup(c2.hit());
             if (c2.hit()) {
                 Object v = decode(key, c2.json(), meta);
@@ -494,9 +563,14 @@ public class TieredEntityCache {
     }
 
     /** L2 全部调用经此降级：通道抛异常（Redis 宕机等）按未命中处理，限频告警，绝不阻断业务读写 */
-    private CacheEntry l2Get(String key) {
+    private CacheEntry l2Get(EntityMetadata meta, String key) {
         try {
-            return l2.get(key);
+            CacheEntry entry = l2.get(key);
+            CacheStatsCollector s = stats;
+            if (s != null) {
+                s.l2Lookup(meta.prefix(), entry.hit());
+            }
+            return entry;
         } catch (Exception e) {
             warnL2Failure("get", e);
             return CacheEntry.miss();
@@ -569,6 +643,7 @@ public class TieredEntityCache {
             String key = key(meta, id);
             CacheEntry c1 = l1.get(key);
             metrics.l1Lookup(c1.hit());
+            statL1(meta, c1.hit());
             CachePeek p = c1.hit() ? toPeek(decode(key, c1.json(), meta))
                     : new CachePeek(CachePeek.State.MISS, null);
             out.add(p);
@@ -583,13 +658,14 @@ public class TieredEntityCache {
                 // 通道不支持批量：逐键 get（同样降级语义；计数由下方主循环统一做，避免重复）
                 l2res = new LinkedHashMap<>();
                 for (String key : missKeys) {
-                    l2res.put(key, l2Get(key));
+                    l2res.put(key, l2Get(meta, key));
                 }
             }
             for (int i = 0; i < missIdx.size(); i++) {
                 String key = missKeys.get(i);
                 CacheEntry entry = l2res.get(key);
                 metrics.l2Lookup(entry != null && entry.hit());
+                statL2(meta, entry != null && entry.hit());
                 if (entry == null || !entry.hit()) {
                     continue;
                 }

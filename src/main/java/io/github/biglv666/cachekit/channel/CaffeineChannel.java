@@ -79,4 +79,10 @@ public class CaffeineChannel implements L1Channel {
     public void evict(String key) {
         cache.invalidate(key);
     }
+
+    @Override
+    public long estimatedSize() {
+        // 清理异步进行，估计值可能与真实条目数有偏差（运维观测用，非精确值）
+        return cache.estimatedSize();
+    }
 }

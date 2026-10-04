@@ -3,6 +3,16 @@
 - **L2 故障降级**：Redis 宕机时按未命中处理（限频告警），业务读写绝不因 L2 失败而失败，由 L1/DB 兜底。
   注意：降级以"单次 Redis 调用返回异常"为边界——命令超时过长（Lettuce 默认 60s）时 Redis 抖动会先把读线程
   阻塞到超时才降级，建议配置 `spring.data.redis.timeout: 2s`（装配时超 5s 会告警）
+- **L2 熔断器（0.3.2+）**：连续失败达 `cache-kit.l2.circuit-breaker.failure-threshold`（默认 20）后短路
+  `open-duration`（默认 10s）——短路期间所有 L2 调用零开销降级（不再逐次触达 Redis、不再逐次阻塞到命令超时），
+  到期放行单个探测请求，成功恢复、失败重新熔断。打开时计 `cache-kit.l2.circuit.opened`、状态 gauge
+  `cache-kit.l2.circuit.state`（0=CLOSED/1=HALF_OPEN/2=OPEN）。
+  注意：熔断不能消除触发前 N 次失败"阻塞到命令超时"的等待（Lettuce 默认 60s），
+  `spring.data.redis.timeout: 2s` 的建议依旧成立——熔断省的是后续海量重试，不是第一次的等待
+- **失效丢失窗口的实测边界（混沌测试发现，0.3.2+）**：Lettuce 默认 `DisconnectedBehavior.DEFAULT`
+  会缓冲断连期间的命令、重连后补投——"DEL 恰好落在闪断窗口"经常被 Lettuce 自己补救，实际丢失窗口
+  常优于下方承诺的最坏情况；`REJECT_COMMANDS`（立即拒绝）下才呈现承诺的上界。两条路径的最终一致
+  语义相同（上界都是 L2 TTL）
 - **L2 删除失败重试（0.3.0+）**：DEL 恰好落在 Redis 闪断窗口内时旧值会滞留 L2——失效路径按双删延迟自动重试
   （上限 3 次），进一步压缩"失效丢失"窗口；重试耗尽计入 `cache-kit.evict.retries.exhausted` 指标
 - **序列化失败不丢数据**：实体含 Jackson 无法序列化的结构（自引用等）时，本次结果照常返回、只是不缓存；

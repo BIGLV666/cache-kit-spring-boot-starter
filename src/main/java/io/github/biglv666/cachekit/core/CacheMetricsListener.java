@@ -39,6 +39,20 @@ public interface CacheMetricsListener {
     default void l2Fallback(String op) {
     }
 
+    /**
+     * L2 熔断器打开（连续失败达到阈值）：短路期间所有 Redis 调用零开销降级，
+     * 不再逐次触达 Redis。{@code l2.fallbacks} 在短路期间也会持续增长。
+     */
+    default void l2CircuitOpened() {
+    }
+
+    /**
+     * L2 熔断器状态迁移（0=CLOSED 1=HALF_OPEN 2=OPEN）。
+     * 频繁 OPEN→CLOSED 往返说明 Redis 持续抖动，应检查网络与服务端。
+     */
+    default void l2CircuitState(int state) {
+    }
+
     /** L2 删除重试达到上限仍失败：旧值滞留 L2，失效丢失由 L2 TTL 上界兜底 */
     default void evictRetryExhausted() {
     }
@@ -49,6 +63,15 @@ public interface CacheMetricsListener {
 
     /** binlog 位点被服务端清理后重置为最新位点：断连窗口内的失效丢失 */
     default void binlogPositionReset() {
+    }
+
+    /**
+     * 启用了 {@link CacheKeyCustomizer} 的宿主中，一批行事件里有 {@code rows} 行无法还原
+     * 自定义键段（未覆写 segmentFor / 行列结构漂移），这些行的 binlog 精确失效被跳过，
+     * 仅 TTL/延迟双删兜底。持续增长说明自定义段无法从行数据推导，应实现
+     * {@code segmentFor} 或检查表结构。
+     */
+    default void binlogDeriveSkipped(int rows) {
     }
 
     /**

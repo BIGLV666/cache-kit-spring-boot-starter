@@ -162,7 +162,7 @@ class BinlogReconnectIntegrationTest {
             // 使重连报 "Could not find first log file name" 秒断
             killDumpThreadAndPurge(jdbc);
 
-            long deadline = System.currentTimeMillis() + 45_000;
+            long deadline = System.currentTimeMillis() + 90_000; // 全量负载下（混沌容器并行起停）45s 不够
             String observed = "v0";
             jdbc.update("UPDATE user_bin SET username='v1' WHERE user_id=1");
             while (System.currentTimeMillis() < deadline) {

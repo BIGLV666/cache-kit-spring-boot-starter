@@ -169,4 +169,77 @@ class BinlogInvalidationIntegrationTest {
             assertThat(misses).as("5s 内未失效的次数").isZero();
         });
     }
+
+    /** 测试用租户上下文：模拟应用线程的 ThreadLocal 租户段（binlog 解析线程拿不到） */
+    static class TenantCtx {
+        static final ThreadLocal<String> TENANT = new ThreadLocal<>();
+    }
+
+    /** 多租户自定义段：segment() 走线程上下文，segmentFor 从 binlog 行数据的 tenant_id 列还原 */
+    @org.springframework.context.annotation.Configuration
+    static class TenantSegmentConfig {
+        @org.springframework.context.annotation.Bean
+        public io.github.biglv666.cachekit.core.CacheKeyCustomizer tenantSegment() {
+            return new io.github.biglv666.cachekit.core.CacheKeyCustomizer() {
+                @Override
+                public String segment() {
+                    return TenantCtx.TENANT.get();
+                }
+
+                @Override
+                public String segmentFor(io.github.biglv666.cachekit.metadata.EntityMetadata meta,
+                                         java.util.Map<String, java.io.Serializable> rowData) {
+                    Object tenant = rowData.get("tenant_id");
+                    return tenant == null ? null : String.valueOf(tenant);
+                }
+            };
+        }
+    }
+
+    /**
+     * 多租户键段还原端到端：带 tenant_id 列的表绕过应用直写后，binlog 失效必须还原出
+     * 含租户段的精确键（{@code 租户:tenant_bin_order:id}）——修复"租户键的 binlog 失效
+     * 不命中"限制；且直写 t1 的行不得连带清掉 t2 的缓存键（租户间隔离）。
+     */
+    @Test
+    void tenantKeyShouldBeInvalidatedByDerivedSegment() {
+        runner().withUserConfiguration(TenantSegmentConfig.class).run(ctx -> {
+            JdbcTemplate jdbc = ctx.getBean(JdbcTemplate.class);
+            jdbc.execute("DROP TABLE IF EXISTS tenant_bin_order");
+            jdbc.execute("CREATE TABLE tenant_bin_order (id BIGINT PRIMARY KEY, tenant_id VARCHAR(16), name VARCHAR(64))");
+            jdbc.update("INSERT INTO tenant_bin_order VALUES (1,'t1','a0')");
+            jdbc.update("INSERT INTO tenant_bin_order VALUES (2,'t2','b0')");
+
+            TenantBinOrderMapper mapper = ctx.getBean(TenantBinOrderMapper.class);
+            try {
+                // 1) 两个租户各自首读：键分别落在 t1:tenant_bin_order:1 与 t2:tenant_bin_order:2
+                TenantCtx.TENANT.set("t1");
+                assertThat(mapper.selectById(1L).getName()).isEqualTo("a0");
+                TenantCtx.TENANT.set("t2");
+                assertThat(mapper.selectById(2L).getName()).isEqualTo("b0");
+
+                // 2) 绕过应用直写 t1 的行（binlog 行事件携带 tenant_id='t1'）
+                jdbc.update("UPDATE tenant_bin_order SET name='a1' WHERE id=1");
+
+                // 3) t1 的键应被还原段精确失效：轮询等待读到新值
+                TenantCtx.TENANT.set("t1");
+                long deadline = System.currentTimeMillis() + 10_000;
+                String observed;
+                while (true) {
+                    observed = mapper.selectById(1L).getName();
+                    if ("a1".equals(observed) || System.currentTimeMillis() > deadline) {
+                        break;
+                    }
+                    Thread.sleep(200);
+                }
+                assertThat(observed).as("租户键必须被还原段精确失效").isEqualTo("a1");
+
+                // 4) 隔离性：直写 t1 的行不能清掉 t2 的缓存（t2 仍命中未失效的 b0）
+                TenantCtx.TENANT.set("t2");
+                assertThat(mapper.selectById(2L).getName()).isEqualTo("b0");
+            } finally {
+                TenantCtx.TENANT.remove();
+            }
+        });
+    }
 }

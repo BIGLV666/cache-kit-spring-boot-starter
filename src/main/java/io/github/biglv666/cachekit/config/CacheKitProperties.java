@@ -270,6 +270,12 @@ public class CacheKitProperties {
         private Duration nullTtl = Duration.ofSeconds(30);
         /** 延迟双删的延迟时长 */
         private Duration doubleDeleteDelay = Duration.ofSeconds(1);
+        /** L2 熔断器配置（Redis 故障时短路降级，省掉故障期间阻塞到命令超时的无效重试） */
+        private final CircuitBreaker circuitBreaker = new CircuitBreaker();
+
+        public CircuitBreaker getCircuitBreaker() {
+            return circuitBreaker;
+        }
 
         public Duration getTtl() {
             return ttl;
@@ -304,11 +310,57 @@ public class CacheKitProperties {
         }
     }
 
+    /**
+     * L2 熔断器配置：连续失败达到阈值后短路一段时间，Redis 故障期间调用零开销降级
+     * （不再逐次尝试、逐次阻塞到命令超时），到期后放行单个探测请求，成功恢复、失败重新熔断。
+     */
+    public static class CircuitBreaker {
+        /**
+         * 是否启用 L2 熔断器。关闭后恢复"L2 每次调用都真实触达 Redis、失败按未命中降级"的
+         * 既有语义——Redis 故障期间每次读写仍会阻塞到命令超时才降级。
+         */
+        private boolean enabled = true;
+        /** CLOSED 态连续失败达到该次数后熔断；成功调用清零计数 */
+        private int failureThreshold = 20;
+        /** OPEN 态持续时间，到期后放行单个探测请求（成功回 CLOSED，失败重新熔断） */
+        private Duration openDuration = Duration.ofSeconds(10);
+
+        public boolean isEnabled() {
+            return enabled;
+        }
+
+        public void setEnabled(boolean enabled) {
+            this.enabled = enabled;
+        }
+
+        public int getFailureThreshold() {
+            return failureThreshold;
+        }
+
+        public void setFailureThreshold(int failureThreshold) {
+            this.failureThreshold = failureThreshold;
+        }
+
+        public Duration getOpenDuration() {
+            return openDuration;
+        }
+
+        public void setOpenDuration(Duration openDuration) {
+            this.openDuration = openDuration;
+        }
+    }
+
     /** 失效广播配置 */
     public static class Broadcast {
         /** 是否启用失效广播（需 Redis；多实例部署必须开启） */
         private boolean enabled = true;
-        /** 广播通道：pubsub（fire-and-forget，进程内存占用为零）或 streams（消费组 ACK，实例短暂掉线不丢） */
+        /**
+         * 广播通道：
+         * pubsub（默认，fire-and-forget，Redis 侧零开销）、
+         * streams（消费组 ACK，实例短暂掉线不丢）、
+         * sharded-pubsub（Redis 7.0+ 分片广播，Cluster 下替代全节点广播；仅 Lettuce 客户端，
+         * 不满足条件或订阅失败时自动回退 pubsub）。
+         */
         private String mode = "pubsub";
         /** 广播 topic（streams 模式下为 Stream 键） */
         private String topic = "cache-kit:invalidate";

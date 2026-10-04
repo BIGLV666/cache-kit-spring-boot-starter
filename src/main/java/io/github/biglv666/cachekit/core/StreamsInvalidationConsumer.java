@@ -57,6 +57,8 @@ public class StreamsInvalidationConsumer implements SmartLifecycle {
     private volatile boolean running;
     private Thread worker;
     private long lastLagComputeAt;
+    /** 最近一次量测的滞后秒数（-1 = 尚未量测），lastDelivered 为空时不更新，避免误报"已追平" */
+    private volatile long lastLagSeconds = -1;
     private volatile CacheMetricsListener metrics = new CacheMetricsListener() {
     };
 
@@ -75,9 +77,14 @@ public class StreamsInvalidationConsumer implements SmartLifecycle {
         this.consumer = "c-" + epoch;
     }
 
-    /** 供测试断言组名格式 */
-    String groupName() {
+    /** 消费组名（内嵌启动纪元，端点展示与测试断言用） */
+    public String groupName() {
         return group;
+    }
+
+    /** 最近一次量测的消费组滞后（秒）；尚未量测过返回 -1（端点展示用） */
+    public long lastLagSeconds() {
+        return lastLagSeconds;
     }
 
     @Override
@@ -164,6 +171,7 @@ public class StreamsInvalidationConsumer implements SmartLifecycle {
             }
             long lag = parseStreamIdMillis(lastGenerated) - parseStreamIdMillis(lastDelivered);
             if (lag >= 0) {
+                lastLagSeconds = lag / 1000;
                 metrics.streamsLagSeconds(lag / 1000);
             }
         } catch (Exception e) {

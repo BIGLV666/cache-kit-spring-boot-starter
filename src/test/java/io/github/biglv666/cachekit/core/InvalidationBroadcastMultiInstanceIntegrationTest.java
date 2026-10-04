@@ -236,4 +236,44 @@ class InvalidationBroadcastMultiInstanceIntegrationTest {
             }
         }
     }
+
+    /**
+     * sharded pub/sub 模式（Redis 7 SSUBSCRIBE/SSEND，Lettuce 原生）：发布端 SSEND、
+     * 订阅端独立连接 SSUBSCRIBE，语义与 pub/sub 一致。单机 Redis 7 下验证端到端送达，
+     * 且断言订阅器运行在 sharded 模式（未静默回退）。
+     */
+    @Test
+    void shardedPubsubModeShouldDeliverToAllInstances() {
+        String topic = "cache-kit:test-sharded-pubsub";
+        ShardedInvalidationPublisher publisher = new ShardedInvalidationPublisher(factory, topic);
+        Instance a = instance(publisher);
+        Instance b = instance(new NoopInvalidationPublisher());
+
+        List<ShardedInvalidationSubscriber> subscribers = new ArrayList<>();
+        try {
+            for (Instance inst : List.of(a, b)) {
+                BroadcastApplier applier = new BroadcastApplier(inst.l1(), registry, "");
+                ShardedInvalidationSubscriber subscriber = new ShardedInvalidationSubscriber(factory, applier, topic);
+                subscriber.start();
+                subscribers.add(subscriber);
+            }
+            // 若意外回退（Redis 不支持 SSUBSCRIBE），断言失败暴露回退而非静默降级
+            assertThat(subscribers).allSatisfy(s ->
+                    assertThat(s.isShardedActive()).as("Redis 7 下订阅器必须运行在 sharded 模式").isTrue());
+
+            preload(a, PUBSUB_IDS);
+            preload(b, PUBSUB_IDS);
+
+            long t0 = System.currentTimeMillis();
+            a.cache().evictBatch(meta, preloadIds(PUBSUB_IDS));
+            int cleared = awaitAllEvicted(List.of(b), preloadIds(PUBSUB_IDS), 20_000);
+            long elapsed = System.currentTimeMillis() - t0;
+
+            System.out.printf("===== sharded pub/sub 多实例广播：2 实例 × %d 键，送达 %d/%d，耗时 %dms =====%n",
+                    PUBSUB_IDS, cleared, PUBSUB_IDS, elapsed);
+            assertThat(cleared).as("另一实例 L1 必须全部清除").isEqualTo(PUBSUB_IDS);
+        } finally {
+            subscribers.forEach(ShardedInvalidationSubscriber::stop);
+        }
+    }
 }

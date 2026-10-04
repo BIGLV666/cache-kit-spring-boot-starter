@@ -82,6 +82,11 @@ public class EntityMetadataRegistry {
         return byPrefix.get(tableName);
     }
 
+    /** 已解析实体的只读快照（前缀 → 元数据），运维端点展示用 */
+    public java.util.Collection<EntityMetadata> entities() {
+        return java.util.Collections.unmodifiableCollection(byPrefix.values());
+    }
+
     /**
      * 广播键解析（订阅端失效用）：键形如 {@code [自定义段:]namespace:前缀:id}，
      * 主键段本身可能含 ':'（String 主键），因此不能从右侧按冒号切分。

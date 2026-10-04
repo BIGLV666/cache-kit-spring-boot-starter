@@ -40,8 +40,11 @@ class MicrometerCacheMetrics implements CacheMetricsListener {
     private final Counter evictRetriesExhausted;
     private final Counter doubleDeleteSkipped;
     private final Counter binlogPositionResets;
+    private final Counter binlogDeriveSkipped;
+    private final Counter circuitOpened;
     private final io.micrometer.core.instrument.Timer invalidationDelay;
     private final java.util.concurrent.atomic.AtomicLong streamsLagSeconds = new java.util.concurrent.atomic.AtomicLong();
+    private final java.util.concurrent.atomic.AtomicLong circuitState = new java.util.concurrent.atomic.AtomicLong();
 
     MicrometerCacheMetrics(MeterRegistry registry) {
         this.registryRef = registry;
@@ -58,6 +61,8 @@ class MicrometerCacheMetrics implements CacheMetricsListener {
         this.evictRetriesExhausted = registry.counter("cache-kit.evict.retries.exhausted");
         this.doubleDeleteSkipped = registry.counter("cache-kit.doubledelete.skipped");
         this.binlogPositionResets = registry.counter("cache-kit.binlog.position.resets");
+        this.binlogDeriveSkipped = registry.counter("cache-kit.binlog.derive.skipped");
+        this.circuitOpened = registry.counter("cache-kit.l2.circuit.opened");
         this.invalidationDelay = io.micrometer.core.instrument.Timer
                 .builder("cache-kit.invalidation.delay")
                 .description("binlog 行事件 MySQL 时间戳 → 本实例失效应用（含时钟偏差，趋势观测用）")
@@ -74,6 +79,11 @@ class MicrometerCacheMetrics implements CacheMetricsListener {
         io.micrometer.core.instrument.Gauge.builder("cache-kit.broadcast.streams.lag.seconds",
                         streamsLagSeconds, java.util.concurrent.atomic.AtomicLong::get)
                 .description("Streams 消费组滞后（最新失效事件 - 本组已读事件的时间戳差）")
+                .register(registry);
+        // L2 熔断器状态：0=CLOSED 1=HALF_OPEN 2=OPEN（状态迁移时由熔断器推送）
+        io.micrometer.core.instrument.Gauge.builder("cache-kit.l2.circuit.state",
+                        circuitState, java.util.concurrent.atomic.AtomicLong::get)
+                .description("L2 熔断器状态（0=CLOSED 1=HALF_OPEN 2=OPEN）")
                 .register(registry);
     }
 
@@ -124,6 +134,16 @@ class MicrometerCacheMetrics implements CacheMetricsListener {
     }
 
     @Override
+    public void l2CircuitOpened() {
+        circuitOpened.increment();
+    }
+
+    @Override
+    public void l2CircuitState(int state) {
+        circuitState.set(state);
+    }
+
+    @Override
     public void evictRetryExhausted() {
         evictRetriesExhausted.increment();
     }
@@ -136,6 +156,11 @@ class MicrometerCacheMetrics implements CacheMetricsListener {
     @Override
     public void binlogPositionReset() {
         binlogPositionResets.increment();
+    }
+
+    @Override
+    public void binlogDeriveSkipped(int rows) {
+        binlogDeriveSkipped.increment(rows);
     }
 
     @Override

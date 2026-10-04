@@ -116,6 +116,21 @@ public class CacheKitAutoConfiguration {
         return new CaffeineChannel(props.getL1().getMaxEntries(), props.getL1().getMaxWeightKb());
     }
 
+    @Bean
+    @ConditionalOnMissingBean(io.github.biglv666.cachekit.core.L2CircuitBreaker.class)
+    @ConditionalOnProperty(prefix = "cache-kit.l2.circuit-breaker", name = "enabled",
+            havingValue = "true", matchIfMissing = true)
+    public io.github.biglv666.cachekit.core.L2CircuitBreaker cacheKitL2CircuitBreaker(
+            CacheKitProperties props,
+            ObjectProvider<io.github.biglv666.cachekit.core.CacheMetricsListener> metrics) {
+        CacheKitProperties.CircuitBreaker cb = props.getL2().getCircuitBreaker();
+        io.github.biglv666.cachekit.core.L2CircuitBreaker breaker =
+                new io.github.biglv666.cachekit.core.L2CircuitBreaker(
+                        cb.getFailureThreshold(), cb.getOpenDuration());
+        breaker.setMetricsListener(metrics.getIfAvailable());
+        return breaker;
+    }
+
     @Bean(destroyMethod = "shutdown")
     @ConditionalOnMissingBean
     public DoubleDeleteScheduler cacheKitDoubleDeleteScheduler(CacheKitProperties props,
@@ -127,6 +142,12 @@ public class CacheKitAutoConfiguration {
 
     @Bean
     @ConditionalOnMissingBean
+    public io.github.biglv666.cachekit.core.CacheStatsCollector cacheStatsCollector() {
+        return new io.github.biglv666.cachekit.core.CacheStatsCollector();
+    }
+
+    @Bean
+    @ConditionalOnMissingBean
     public TieredEntityCache tieredEntityCache(CacheKitProperties props,
                                                EntityMetadataRegistry registry,
                                                L1Channel l1,
@@ -134,11 +155,13 @@ public class CacheKitAutoConfiguration {
                                                ObjectProvider<InvalidationPublisher> publisher,
                                                DoubleDeleteScheduler doubleDeleteScheduler,
                                                ObjectProvider<io.github.biglv666.cachekit.core.CacheKeyCustomizer> keyCustomizers,
-                                               ObjectProvider<io.github.biglv666.cachekit.core.CacheMetricsListener> metrics) {
+                                               ObjectProvider<io.github.biglv666.cachekit.core.CacheMetricsListener> metrics,
+                                               ObjectProvider<io.github.biglv666.cachekit.core.CacheStatsCollector> statsCollector) {
         TieredEntityCache cache = new TieredEntityCache(props, l1, l2.getIfAvailable(),
                 publisher.getIfAvailable(NoopInvalidationPublisher::new), doubleDeleteScheduler,
                 props.getKeyNamespace(), keyCustomizers.stream().toList());
         cache.setMetricsListener(metrics.getIfAvailable());
+        cache.setStatsCollector(statsCollector.getIfAvailable());
         return cache;
     }
 
@@ -190,7 +213,9 @@ public class CacheKitAutoConfiguration {
         @Bean
         @ConditionalOnMissingBean
         public RedisChannel cacheKitL2Channel(ObjectProvider<StringRedisTemplate> templateProvider,
-                                              ObjectProvider<RedisConnectionFactory> factoryProvider) {
+                                              ObjectProvider<RedisConnectionFactory> factoryProvider,
+                                              ObjectProvider<io.github.biglv666.cachekit.core.CacheMetricsListener> metricsProvider,
+                                              ObjectProvider<io.github.biglv666.cachekit.core.L2CircuitBreaker> breakerProvider) {
             StringRedisTemplate template = templateProvider.getIfAvailable();
             RedisConnectionFactory factory = template != null
                     ? template.getConnectionFactory()
@@ -200,7 +225,10 @@ public class CacheKitAutoConfiguration {
                 template.afterPropertiesSet();
             }
             warnIfCommandTimeoutLong(factory);
-            return new RedisChannel(template);
+            RedisChannel channel = new RedisChannel(template);
+            channel.setMetricsListener(metricsProvider.getIfAvailable());
+            channel.setCircuitBreaker(breakerProvider.getIfAvailable());
+            return channel;
         }
 
         /**
@@ -231,8 +259,21 @@ public class CacheKitAutoConfiguration {
                         l2Channel.template(), props.getBroadcast().getTopic(),
                         props.getBroadcast().getStreamsMaxlen());
             }
+            if ("sharded-pubsub".equalsIgnoreCase(mode)) {
+                if (l2Channel.template().getConnectionFactory()
+                        instanceof org.springframework.data.redis.connection.lettuce.LettuceConnectionFactory lettuceFactory) {
+                    // SPUBLISH 需经 Lettuce 原生 dispatch（spring-data-redis 未封装该命令），
+                    // 发布器直取工厂原始连接（模板会包 DefaultStringRedisConnection）
+                    return new io.github.biglv666.cachekit.core.ShardedInvalidationPublisher(
+                            lettuceFactory, props.getBroadcast().getTopic());
+                }
+                log.warn("cache-kit.broadcast.mode=sharded-pubsub 仅支持 Lettuce 客户端，"
+                        + "当前工厂类型 {}，已回退普通 pub/sub 模式",
+                        l2Channel.template().getConnectionFactory().getClass().getName());
+                return new RedisInvalidationPublisher(l2Channel.template(), props.getBroadcast().getTopic());
+            }
             if (!"pubsub".equalsIgnoreCase(mode)) {
-                throw new CacheKitException("cache-kit.broadcast.mode 仅支持 pubsub 或 streams: " + mode);
+                throw new CacheKitException("cache-kit.broadcast.mode 仅支持 pubsub、streams 或 sharded-pubsub: " + mode);
             }
             return new RedisInvalidationPublisher(l2Channel.template(), props.getBroadcast().getTopic());
         }
@@ -262,7 +303,15 @@ public class CacheKitAutoConfiguration {
                 consumer.setMetricsListener(metricsProvider.getIfAvailable());
                 return consumer;
             }
-            // pubsub（默认）
+            if ("sharded-pubsub".equalsIgnoreCase(mode)
+                    && l2Channel.template().getConnectionFactory()
+                            instanceof org.springframework.data.redis.connection.lettuce.LettuceConnectionFactory lettuceFactory) {
+                // Lettuce 原生 SSUBSCRIBE；start() 失败（Redis<7 等）由订阅器内部回退 pub/sub 容器。
+                // 广播接收指标由 applier 统一承担，订阅器自身无需单独挂载
+                return new io.github.biglv666.cachekit.core.ShardedInvalidationSubscriber(
+                        lettuceFactory, applier, props.getBroadcast().getTopic());
+            }
+            // 非 Lettuce 的 sharded-pubsub 与 pubsub（默认）都走监听容器
             RedisMessageListenerContainer container = new RedisMessageListenerContainer();
             container.setConnectionFactory(l2Channel.template().getConnectionFactory());
             InvalidationSubscriber subscriber = new InvalidationSubscriber(l1Channel, registry, props.getKeyNamespace());
@@ -386,6 +435,31 @@ public class CacheKitAutoConfiguration {
     }
 
     /**
+     * /actuator/cachekit 运维端点条件装配：spring-boot-actuator 在类路径时注册。
+     * 端点只读，仅暴露前缀/计数/状态（不含缓存键值与 binlog 凭据）；Boot 4 若调整
+     * actuator 包结构导致条件不成立，端点静默缺席，不影响缓存功能。
+     */
+    @Configuration(proxyBeanMethods = false)
+    @ConditionalOnClass(org.springframework.boot.actuate.endpoint.annotation.Endpoint.class)
+    static class CacheKitEndpointConfiguration {
+
+        @Bean
+        @ConditionalOnMissingBean
+        public io.github.biglv666.cachekit.actuate.CacheKitEndpoint cacheKitEndpoint(
+                CacheKitProperties props,
+                EntityMetadataRegistry registry,
+                ObjectProvider<TieredEntityCache> cache,
+                ObjectProvider<L1Channel> l1,
+                ObjectProvider<DoubleDeleteScheduler> doubleDeleteScheduler,
+                ObjectProvider<io.github.biglv666.cachekit.core.StreamsInvalidationConsumer> streamsConsumer,
+                ObjectProvider<io.github.biglv666.cachekit.core.L2CircuitBreaker> circuitBreaker,
+                ObjectProvider<io.github.biglv666.cachekit.core.CacheStatsCollector> stats) {
+            return new io.github.biglv666.cachekit.actuate.CacheKitEndpoint(
+                    props, registry, cache, l1, doubleDeleteScheduler, streamsConsumer, circuitBreaker, stats);
+        }
+    }
+
+    /**
      * binlog 防呆：cache-kit.binlog.enabled=true 但类路径缺 binlog connector 时快速失败。
      *
      * <p>0.3.0 起 mysql-binlog-connector-java 为 optional 依赖：类缺失时
@@ -471,7 +545,8 @@ public class CacheKitAutoConfiguration {
                     : DataSourcePropertiesReflection.determine(dsProps, "determinePassword");
 
             BinlogInvalidationListener listener = new BinlogInvalidationListener(
-                    tieredEntityCache, registry, dataSourceProvider.getIfAvailable(), database);
+                    tieredEntityCache, registry, dataSourceProvider.getIfAvailable(), database,
+                    props.getKeyNamespace(), keyCustomizers.stream().toList());
             listener.setMetricsListener(metricsProvider.getIfAvailable());
             com.github.shyiko.mysql.binlog.BinaryLogClient client =
                     new com.github.shyiko.mysql.binlog.BinaryLogClient(host, port, username, password);
@@ -495,9 +570,10 @@ public class CacheKitAutoConfiguration {
             }
             client.registerEventListener(listener);
             if (keyCustomizers.stream().findAny().isPresent()) {
-                log.warn("cache-kit.binlog 与 CacheKeyCustomizer 同时启用存在已知限制：binlog 解析线程"
-                        + "无法还原租户键段，租户键的 binlog 失效不会命中（仅 TTL/双删兜底）。"
-                        + "多租户场景建议暂不启用 binlog。");
+                log.info("cache-kit.binlog 与 CacheKeyCustomizer 同时启用：覆写了 segmentFor 的自定义段"
+                        + "会从 binlog 行数据还原键段、按精确键失效；未实现 segmentFor 的自定义段"
+                        + "无法还原（binlog 解析线程没有应用上下文），对应行的精确失效跳过"
+                        + "（cache-kit.binlog.derive.skipped 指标计数，仅 TTL/延迟双删兜底）。");
             }
             return client;
         }

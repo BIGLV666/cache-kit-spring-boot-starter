@@ -70,6 +70,14 @@
             <artifactId>spring-data-redis</artifactId>
             <optional>true</optional>
         </dependency>
+        <!-- sharded pub/sub（SSUBSCRIBE/SSEND）：Lettuce 原生 API，spring-data-redis 未封装该命令。
+             optional（Boot 默认客户端即 Lettuce；仅 broadcast.mode=sharded-pubsub 且工厂为
+             LettuceConnectionFactory 时类才会被加载，Jedis 宿主装配处回退 pub/sub） -->
+        <dependency>
+            <groupId>io.lettuce</groupId>
+            <artifactId>lettuce-core</artifactId>
+            <optional>true</optional>
+        </dependency>
         <dependency>
             <groupId>com.baomidou</groupId>
             <artifactId>mybatis-plus-core</artifactId>
@@ -80,6 +88,12 @@
         <dependency>
             <groupId>io.micrometer</groupId>
             <artifactId>micrometer-core</artifactId>
+            <optional>true</optional>
+        </dependency>
+        <!-- /actuator/cachekit 运维端点：actuator 在类路径时注册（optional，端点注解所在） -->
+        <dependency>
+            <groupId>org.springframework.boot</groupId>
+            <artifactId>spring-boot-actuator</artifactId>
             <optional>true</optional>
         </dependency>
         <!-- binlog 直连失效：optional（类路径存在且 binlog.enabled=true 时才启用，与 L2/MP 同模式），
@@ -143,6 +157,13 @@
             <groupId>org.testcontainers</groupId>
             <artifactId>junit-jupiter</artifactId>
             <version>1.21.3</version>
+            <scope>test</scope>
+        </dependency>
+        <!-- 混沌测试：toxiproxy 注入 TCP 挂起/断连故障，验证熔断与降级的真实边界 -->
+        <dependency>
+            <groupId>org.testcontainers</groupId>
+            <artifactId>toxiproxy</artifactId>
+            <version>1.21.4</version>
             <scope>test</scope>
         </dependency>
         <dependency>

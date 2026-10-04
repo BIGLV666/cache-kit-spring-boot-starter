@@ -18,11 +18,20 @@ cache-kit:
     jitter: 60s            # TTL 随机抖动上限（防雪崩），0 关闭；基准 TTL 非正时不叠加抖动
     null-ttl: 30s          # null 占位的短 TTL（防穿透）；非正值 = 不缓存 null 占位（关闭穿透防护）
     double-delete-delay: 1s  # 延迟双删间隔；写极热键时可调小或评估回源放大
+    circuit-breaker:       # L2 熔断器（0.3.2+）：连续失败后短路，省掉故障期间阻塞到命令超时的无效重试
+      enabled: true        # 关闭后恢复"每次调用都真实触达 Redis、失败按未命中降级"的语义
+      failure-threshold: 20  # 连续失败达该次数后熔断（成功清零）
+      open-duration: 10s   # 熔断持续时长，到期放行单个探测请求（成功恢复，失败重新熔断）。
+                           # 注意：熔断不能消除前 N 次失败"阻塞到命令超时"的等待，
+                           # spring.data.redis.timeout 的调整建议依旧成立
   broadcast:               # 失效广播（多实例部署必须开启）
     enabled: true
     mode: pubsub           # pubsub（fire-and-forget）| streams（0.3.1+，消费组 ACK，
                            # 实例短暂掉线不丢失效、恢复后补投；每实例一个消费组，
                            # 崩溃残留组由存活实例周期清理；Redis 侧多一份 Stream 数据）
+                           # | sharded-pubsub（0.3.2+，Redis 7.0+ 分片广播，Cluster 下
+                           # SSUBSCRIBE/SPUBLISH 替代全节点订阅/广播；仅 Lettuce 客户端，
+                           # 非 Lettuce 或订阅失败时自动回退 pubsub 并告警）
     topic: cache-kit:invalidate  # streams 模式下为 Stream 键
     streams-maxlen: 10000  # streams 模式 Stream 近似裁剪上界（XADD MAXLEN ~）
   mp:                      # MyBatis-Plus 适配

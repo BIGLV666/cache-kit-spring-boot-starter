@@ -85,6 +85,11 @@ public class DoubleDeleteScheduler {
         }
     }
 
+    /** 当前待执行的双删任务数（积压观测用，端点展示） */
+    public int pendingCount() {
+        return pending.get();
+    }
+
     /** 释放线程池 */
     public void shutdown() {
         executor.shutdownNow();

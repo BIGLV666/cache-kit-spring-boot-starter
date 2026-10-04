@@ -20,11 +20,30 @@
 | `cache-kit.l1.hit.rate` / `cache-kit.l2.hit.rate` | 命中率 Gauge（hit/(hit+miss)，由计数器实时计算） |
 | `cache-kit.invalidation.delay`（Timer，p50/p99） | binlog 行事件 MySQL 时间戳 → 本实例失效应用的传播延迟；**含两侧时钟偏差，趋势观测用** |
 | `cache-kit.broadcast.streams.lag.seconds`（Gauge） | streams 模式本实例消费组滞后（最新失效事件 - 本组已读事件的时间戳差）；持续 >0 说明消费方处理不过来或断连 |
+| `cache-kit.l2.circuit.opened` | L2 熔断器打开次数（0.3.2+）；频繁增长说明 Redis 持续抖动，应检查网络与服务端 |
+| `cache-kit.l2.circuit.state`（Gauge） | L2 熔断器当前状态：0=CLOSED 1=HALF_OPEN 2=OPEN（0.3.2+） |
+| `cache-kit.binlog.derive.skipped` | binlog 键段还原跳过的行数（0.3.2+，自定义段无法从行数据还原时）；持续增长说明自定义器应实现 `segmentFor` |
 
 ## 告警建议
 
 `evict.retries.exhausted`、`doubledelete.skipped`、`binlog.position.resets` 三者对应真实的数据丢失/陈旧窗口，
-持续增长即应触发排查；`l2.fallbacks{op}` 是 Redis 健康度的直接信号。
+持续增长即应触发排查；`l2.fallbacks{op}` 是 Redis 健康度的直接信号；`l2.circuit.state` 频繁离开 0
+说明 Redis 持续抖动；`binlog.derive.skipped` 持续增长说明自定义键段无法从行数据还原。
+
+## 运维端点（/actuator/cachekit，0.3.2+）
+
+宿主引入 spring-boot-actuator 后自动注册只读端点 `/actuator/cachekit`
+（暴露范围由宿主 `management.endpoints.web.exposure.include` 管理）：
+
+- **l1**：条目估计值、TTL、容量上限；
+- **l2**：TTL、null 占位 TTL、熔断器开关与状态（CLOSED/HALF_OPEN/OPEN/DISABLED）；
+- **doubleDelete**：当前积压任务数 / 上限（1 万）；
+- **streams**（streams 模式）：消费组名、最近量测的滞后秒数（-1 = 尚未量测）；
+- **entities**：按实体前缀合并的注册元数据（TTL、实体类型）与累计统计——
+  L1/L2 命中数与命中率、DB 回源、null 占位、失效计数（命中率 = hit/(hit+miss)，
+  -1 表示无请求）。
+
+安全边界：只输出前缀、计数与状态，**不含任何缓存键值**；不含 binlog 凭据等敏感配置。
 
 ## Grafana 面板
 

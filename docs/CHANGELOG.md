@@ -2,6 +2,27 @@
 
 ## 0.3.2（未发布）
 
+- **新增**：sharded pub/sub 广播模式（`cache-kit.broadcast.mode=sharded-pubsub`）——
+  Redis 7.0+ 的 SSUBSCRIBE/SPUBLISH 分片广播，Cluster 下失效消息只达 topic 所属分片节点
+  （替代全节点广播，连接与广播开销 O(节点数) → O(1)）；spring-data-redis 未封装该命令，
+  实现走 Lettuce 原生 API（新增 optional 依赖 `io.lettuce:lettuce-core`），仅支持 Lettuce 客户端
+  （Boot 默认），非 Lettuce 或订阅失败（Redis<7 等）自动回退 pub/sub 并告警；每 30s 幂等重订阅
+  覆盖重连窗口。Cluster 模式建议按发布流程跑冒烟验证
+- **新增**：L2 熔断器（`cache-kit.l2.circuit-breaker.*`，默认开）——连续失败 20 次短路 10s，
+  故障期间 L2 调用零开销降级（不再逐次阻塞到命令超时），到期单探测恢复；指标
+  `cache-kit.l2.circuit.opened` + 状态 gauge `cache-kit.l2.circuit.state`
+- **新增**：`/actuator/cachekit` 运维端点（spring-boot-actuator 在类路径时注册）——实体级
+  L1/L2 命中率与计数、DB 回源、null 占位、L1 条数估计、双删积压、streams 滞后、熔断状态；
+  只读，不含缓存键值。新增实体维度统计收集器（与全局 Micrometer 指标并行，`CacheStatsCollector`）
+- **验证**：混沌测试套件（`src/test/java/.../chaos/`，按子包隔离）——真实停机/网络挂起
+  （toxiproxy）/恶意输入/binlog 表结构漂移四类故障注入，实证降级与 TTL 兜底承诺。
+  实测发现（已写入 RESILIENCE.md）：Lettuce 默认断连缓冲会把"失败"的失效 DEL 在重连后
+  补投成功，失效丢失窗口经常优于文档承诺的最坏情况
+- **修复/增强**：多租户键的 binlog 失效不命中——`CacheKeyCustomizer` 新增
+  `segmentFor(meta, rowData)` SPI，覆写后 binlog 从行数据（如 tenant_id 列）还原键段、
+  按含段精确键失效（同时保留无段键失效兜底）；未实现 SPI 的自定义段跳过并计
+  `cache-kit.binlog.derive.skipped`（LIMITATIONS 相应改写）
+
 - **新增**：binlog GTID 位点模式（`cache-kit.binlog.gtid-enabled`）——GTID 集替代 file/position，
   主从切换后位点仍连续；connector 内置 `gtidSetFallbackToPurged`（扫 PURGE 后自动回退）。
   未显式配置 gtid-set 时启动查询 `@@global.gtid_executed` 为起点（connector 默认从最早事件回放

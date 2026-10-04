@@ -10,8 +10,11 @@
 - 写方法处于活动事务时，失效延迟到 **afterCommit** 执行（`cache-kit.tx.evict-after-commit`，默认开），事务回滚不失效。
   注意语义：同事务内先写后读同键会读到缓存里的**提交前旧值**（失效被延迟了），需要同事务立即可见时用 `CacheKit.withDb` 旁路读取
 - binlog 模式下主键列序号来自 `information_schema`，**按表缓存于进程生命周期内**——改表结构需重启进程后重新解析
-- binlog 与 `CacheKeyCustomizer` 组合存在已知限制：binlog 解析线程无法还原租户键段，租户键的 binlog 失效不会命中
-  （仅 TTL/双删兜底），多租户场景建议暂不启用 binlog
+- binlog 与 `CacheKeyCustomizer` 组合（0.3.2 起大部分已解）：binlog 解析线程没有应用上下文，
+  覆写了 `segmentFor(meta, rowData)` 的自定义器可从行数据（列名 → 值）还原键段，binlog 失效按
+  含段精确键命中（同时兜底无段键）；**未实现 `segmentFor` 的自定义段无法还原**，对应行的精确
+  失效跳过（`cache-kit.binlog.derive.skipped` 指标 + 限频告警，仅 TTL/双删兜底）。
+  行镜像列数与 information_schema 缓存列数不一致（表结构漂移）时同样跳过并计数
 
 ## 已知限制与说明
 
