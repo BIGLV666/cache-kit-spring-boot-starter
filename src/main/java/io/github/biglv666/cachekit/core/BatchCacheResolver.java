@@ -61,14 +61,19 @@ public final class BatchCacheResolver {
         if (BypassContext.isActive()) {
             return dbBatchLoader.apply(new ArrayList<>(new LinkedHashSet<>(requestedIds)));
         }
-        // 归一化 map 键（Long 1 与 "1" 指向同一行），LinkedHashSet 保持请求顺序并去重
+        // 归一化 map 键（Long 1 与 "1" 指向同一行；复合主键 Collection 归一为 join 段），
+        // LinkedHashSet 保持请求顺序并去重
         Set<String> seen = new LinkedHashSet<>();
         Map<String, Object> requestedByKey = new LinkedHashMap<>();
         for (Object id : requestedIds) {
             if (id == null) {
                 continue;
             }
-            String k = String.valueOf(id);
+            String k = TieredEntityCache.idSegment(id);
+            if (k == null) {
+                // 复合主键含 null 段：按无主键处理，不进缓存链
+                continue;
+            }
             if (seen.add(k)) {
                 requestedByKey.put(k, id);
             }
@@ -79,7 +84,7 @@ public final class BatchCacheResolver {
         List<Object> orderedIds = new ArrayList<>(requestedByKey.values());
         List<TieredEntityCache.CachePeek> peeks = cache.peekBatch(meta, orderedIds);
         for (int i = 0; i < orderedIds.size(); i++) {
-            String k = String.valueOf(orderedIds.get(i));
+            String k = TieredEntityCache.idSegment(orderedIds.get(i));
             switch (peeks.get(i).state()) {
                 case HIT -> resolved.put(k, peeks.get(i).value());
                 case HIT_NULL -> {
@@ -95,7 +100,7 @@ public final class BatchCacheResolver {
             for (int i = 0; i < missing.size(); i++) {
                 Object entity = loaded[i];
                 if (entity != null) {
-                    resolved.put(String.valueOf(missing.get(i)), entity);
+                    resolved.put(TieredEntityCache.idSegment(missing.get(i)), entity);
                 }
                 // 不存在的 ID 已由 loadBatch 写入 null 占位（cacheNull 时）
             }

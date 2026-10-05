@@ -26,11 +26,15 @@ class EntityMetadataRegistryTest {
     }
 
     @Test
-    void multipleCacheIdShouldFailFast() {
-        // 歧义主键会缓存键错位读回错行数据：多个 @CacheId 必须拒绝启动
-        assertThatThrownBy(() -> registry.require(io.github.biglv666.cachekit.model.DualIdEntity.class))
-                .isInstanceOf(CacheKitException.class)
-                .hasMessageContaining("@CacheId");
+    void multipleCacheIdShouldFormCompositeKey() {
+        // 0.3.3+：多个 @CacheId 组成复合主键（声明顺序 join ':'），不再 fail-fast；
+        // MP @TableId 多标注仍拒绝（MyBatis-Plus 本身不支持复合主键）
+        EntityMetadata meta = registry.require(io.github.biglv666.cachekit.model.DualIdEntity.class);
+        assertThat(meta.idFields()).hasSize(2);
+        assertThat(meta.idFields().get(0).getName()).isEqualTo("userId");
+        assertThat(meta.idFields().get(1).getName()).isEqualTo("code");
+        // 复合主键实体没有唯一主键字段
+        assertThatThrownBy(meta::idField).isInstanceOf(CacheKitException.class);
     }
 
     @Test

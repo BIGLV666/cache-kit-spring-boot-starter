@@ -237,6 +237,22 @@ public class CacheKitProperties {
         }
         /** L1 TTL：必须显著小于 l2.ttl，作为 pub/sub 丢消息时的脏读上界 */
         private Duration ttl = Duration.ofSeconds(30);
+        /**
+         * L1 预刷新窗口：L1 命中且剩余 TTL 低于该值时，返回当前值并异步刷新（走 L2/DB 回填），
+         * 把"过期后首次读的回源延迟"提前消化。读永远拿未过期值，"L1 TTL = 脏读上界"承诺不变；
+         * null 占位同样会被预刷新（到期前重探 DB，数据出现后能及时发现）。
+         * 0（默认）关闭；必须小于 l1.ttl，否则启动告警并禁用。仅作用于单条读路径，
+         * 批量查询（selectBatchIds）不触发预刷新。
+         */
+        private Duration refreshAhead = Duration.ZERO;
+
+        public Duration getRefreshAhead() {
+            return refreshAhead;
+        }
+
+        public void setRefreshAhead(Duration refreshAhead) {
+            this.refreshAhead = refreshAhead == null ? Duration.ZERO : refreshAhead;
+        }
 
         public long getMaxEntries() {
             return maxEntries;
@@ -270,8 +286,48 @@ public class CacheKitProperties {
         private Duration nullTtl = Duration.ofSeconds(30);
         /** 延迟双删的延迟时长 */
         private Duration doubleDeleteDelay = Duration.ofSeconds(1);
+        /**
+         * L2 单值大小上限（单位 KB，按序列化 JSON 的 UTF-16 字符数近似计）：超过则该值
+         * 两级都不写缓存（与"序列化失败不缓存"同语义，读每次回源 DB），计
+         * {@code cache-kit.l2.value.oversized} 指标并限频告警。0 或负数关闭上限。
+         * 默认 512：防少量大字段（长文本/大 JSON 列）撑爆 Redis 内存与网络。
+         */
+        private long maxValueKb = 512;
+        /**
+         * 是否对达到 compression-min-kb 阈值的 L2 值启用 gzip + Base64 压缩存储：
+         * 省 Redis 内存与网络传输，代价是写入/读取的 CPU。L1 永远存原文
+         * （本地内存无网络传输，且权重按字符数计），解压在 L2 读出口统一完成。
+         * 关闭时存量压缩值仍可正常读取（读侧按 "gz:" 前缀识别，与配置无关）。
+         */
+        private boolean compressionEnabled = false;
+        /** L2 压缩阈值（K 字符）：序列化 JSON 字符数达到该值才压缩，小值压缩得不偿失 */
+        private long compressionMinKb = 32;
         /** L2 熔断器配置（Redis 故障时短路降级，省掉故障期间阻塞到命令超时的无效重试） */
         private final CircuitBreaker circuitBreaker = new CircuitBreaker();
+
+        public long getMaxValueKb() {
+            return maxValueKb;
+        }
+
+        public void setMaxValueKb(long maxValueKb) {
+            this.maxValueKb = maxValueKb;
+        }
+
+        public boolean isCompressionEnabled() {
+            return compressionEnabled;
+        }
+
+        public void setCompressionEnabled(boolean compressionEnabled) {
+            this.compressionEnabled = compressionEnabled;
+        }
+
+        public long getCompressionMinKb() {
+            return compressionMinKb;
+        }
+
+        public void setCompressionMinKb(long compressionMinKb) {
+            this.compressionMinKb = compressionMinKb;
+        }
 
         public CircuitBreaker getCircuitBreaker() {
             return circuitBreaker;

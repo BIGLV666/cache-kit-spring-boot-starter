@@ -71,4 +71,42 @@ class CacheKitAutoConfigurationValidationTest {
                     });
         }
     }
+
+    @Test
+    void refreshAheadNotBelowL1TtlShouldBeDisabledWithWarning() {
+        // 预刷新窗口 >= l1.ttl 会导致每次读都触发刷新（等效每次读多一次后台 DB 查询）：
+        // 启动告警并禁用（置零），而非 fail-fast 或放行
+        new ApplicationContextRunner()
+                .withConfiguration(AutoConfigurations.of(
+                        BootAutoconfigCompat.redis(),
+                        CacheKitAutoConfiguration.class))
+                .withPropertyValues(
+                        "spring.data.redis.host=localhost",
+                        "spring.data.redis.port=6379",
+                        "cache-kit.l1.ttl=10s",
+                        "cache-kit.l1.refresh-ahead=10s")
+                .run(ctx -> {
+                    assertThat(ctx).hasNotFailed();
+                    assertThat(ctx.getBean(CacheKitProperties.class).getL1().getRefreshAhead())
+                            .isEqualTo(java.time.Duration.ZERO);
+                });
+    }
+
+    @Test
+    void validRefreshAheadShouldBeKept() {
+        new ApplicationContextRunner()
+                .withConfiguration(AutoConfigurations.of(
+                        BootAutoconfigCompat.redis(),
+                        CacheKitAutoConfiguration.class))
+                .withPropertyValues(
+                        "spring.data.redis.host=localhost",
+                        "spring.data.redis.port=6379",
+                        "cache-kit.l1.ttl=30s",
+                        "cache-kit.l1.refresh-ahead=10s")
+                .run(ctx -> {
+                    assertThat(ctx).hasNotFailed();
+                    assertThat(ctx.getBean(CacheKitProperties.class).getL1().getRefreshAhead())
+                            .isEqualTo(java.time.Duration.ofSeconds(10));
+                });
+    }
 }

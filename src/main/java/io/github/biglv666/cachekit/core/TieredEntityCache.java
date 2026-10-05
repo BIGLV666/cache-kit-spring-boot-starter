@@ -2,6 +2,7 @@ package io.github.biglv666.cachekit.core;
 
 import io.github.biglv666.cachekit.channel.CacheChannel;
 import io.github.biglv666.cachekit.channel.CacheEntry;
+import io.github.biglv666.cachekit.channel.L1Channel;
 import io.github.biglv666.cachekit.config.CacheKitProperties;
 import io.github.biglv666.cachekit.exception.CacheKitException;
 import io.github.biglv666.cachekit.exception.IdMisfireException;
@@ -10,8 +11,13 @@ import io.github.biglv666.cachekit.support.JsonCodec;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
+import java.io.ByteArrayInputStream;
+import java.io.ByteArrayOutputStream;
+import java.nio.charset.StandardCharsets;
 import java.time.Duration;
 import java.util.ArrayList;
+import java.util.Base64;
+import java.util.Collection;
 import java.util.LinkedHashMap;
 import java.util.LinkedHashSet;
 import java.util.List;
@@ -20,9 +26,13 @@ import java.util.Set;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CompletionException;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.Executor;
+import java.util.concurrent.RejectedExecutionException;
 import java.util.concurrent.ThreadLocalRandom;
 import java.util.function.Function;
 import java.util.function.Supplier;
+import java.util.zip.GZIPInputStream;
+import java.util.zip.GZIPOutputStream;
 
 /**
  * 三级链核心：L1（Caffeine）→ L2（Redis，可选）→ loader（查 DB）read-through，
@@ -46,6 +56,12 @@ public class TieredEntityCache {
 
     private static final Logger log = LoggerFactory.getLogger(TieredEntityCache.class);
 
+    /**
+     * L2 压缩值标记前缀：无碰撞——合法 JSON 顶层只可能以 { [ " 数字 t f n - 开头，
+     * null 占位以 _ 开头；读侧按前缀识别（与配置无关），关闭压缩后存量压缩值仍可读。
+     */
+    static final String GZ_PREFIX = "gz:";
+
     /** 解码结果标记：命中的是 null 占位 */
     private static final Object NULL_VALUE = new Object();
     /** 解码结果标记：JSON 反序列化失败（实体结构漂移），按未命中继续 */
@@ -61,6 +77,18 @@ public class TieredEntityCache {
 
     /** single-flight：同 key 的并发回源合并为一个执行（单条与批量共用） */
     private final ConcurrentHashMap<String, CompletableFuture<Object>> inflight = new ConcurrentHashMap<>();
+
+    /** L1 预刷新去重表：同一键的刷新任务从提交到完成只存在一个（读路径高频，无锁快速失败） */
+    private final ConcurrentHashMap<String, Boolean> refreshInFlight = new ConcurrentHashMap<>();
+    /** 预刷新专用线程池（AutoConfiguration 装配；null = 功能关闭） */
+    private volatile Executor refreshExecutor;
+    private volatile long lastRefreshFailWarnAt;
+
+    /** L2 单值上限（K 字符，按 UTF-16 字符数近似计；Long.MAX_VALUE = 不限） */
+    private final long maxValueChars;
+    /** L2 压缩开关与阈值（K 字符），构造时从配置固化 */
+    private final boolean compressionEnabled;
+    private final long compressionMinChars;
 
     private volatile CacheMetricsListener metrics = new CacheMetricsListener() {
     };
@@ -120,6 +148,16 @@ public class TieredEntityCache {
         this.doubleDeleteScheduler = doubleDeleteScheduler;
         this.namespace = namespace == null ? "" : namespace;
         this.keyCustomizers = keyCustomizers == null ? List.of() : keyCustomizers;
+        this.maxValueChars = props.getL2().getMaxValueKb() > 0
+                ? props.getL2().getMaxValueKb() * 1024
+                : Long.MAX_VALUE;
+        this.compressionEnabled = props.getL2().isCompressionEnabled();
+        this.compressionMinChars = Math.max(1, props.getL2().getCompressionMinKb()) * 1024;
+    }
+
+    /** 接入 L1 预刷新线程池（null 或不调用 = 功能关闭）；配置校验（窗口 &lt; l1.ttl）由装配层完成 */
+    public void setRefreshAheadExecutor(Executor refreshExecutor) {
+        this.refreshExecutor = refreshExecutor;
     }
 
     /**
@@ -127,6 +165,10 @@ public class TieredEntityCache {
      * + 实体前缀 + 主键。迁移主键类型/表名时改 namespace 即可整体弃用旧键。
      */
     private String key(EntityMetadata meta, Object id) {
+        return keyFromSegment(meta, idSegment(id));
+    }
+
+    private String keyFromSegment(EntityMetadata meta, String idSegment) {
         StringBuilder sb = new StringBuilder();
         for (CacheKeyCustomizer customizer : keyCustomizers) {
             String segment;
@@ -145,7 +187,22 @@ public class TieredEntityCache {
         if (!namespace.isBlank()) {
             sb.append(namespace).append(':');
         }
-        return sb.append(meta.prefix()).append(':').append(id).toString();
+        return sb.append(meta.prefix()).append(':').append(idSegment).toString();
+    }
+
+    /**
+     * 主键 → 键段：标量即字符串形式；复合主键（Collection/Object[]，如手动句柄
+     * {@code get(List.of(v1, v2))}）按序 join ':'。段为 null 或任一子段为 null 返回 null
+     *（调用方按无主键处理）；子段含 ':' 抛 CacheKitException（键段歧义，绝不落缓存）。
+     */
+    static String idSegment(Object id) {
+        if (id instanceof Collection<?> coll) {
+            return EntityMetadata.joinSegments(new ArrayList<>(coll));
+        }
+        if (id instanceof Object[] arr) {
+            return EntityMetadata.joinSegments(List.of(arr));
+        }
+        return String.valueOf(id);
     }
 
     /**
@@ -167,11 +224,21 @@ public class TieredEntityCache {
             // null 主键会产生 "前缀:null" 键并与字面 "null" 主键冲突，直接拒绝
             throw new CacheKitException("缓存读取的主键不能为 null: " + meta.entityType().getName());
         }
-        String key = key(meta, id);
+        String idSeg = idSegment(id);
+        if (idSeg == null) {
+            // 复合主键任一段为 null：部分主键的键会与真实行错位，拒绝而非猜测
+            throw new CacheKitException("缓存读取的复合主键含 null 段: " + meta.entityType().getName());
+        }
+        String key = keyFromSegment(meta, idSeg);
 
         CacheEntry c1 = l1.get(key);
         metrics.l1Lookup(c1.hit());
         statL1(meta, c1.hit());
+        if (c1.hit()) {
+            // 剩余 TTL 不足预刷新窗口：返回当前值 + 异步刷新（读永远拿未过期值，
+            // "L1 TTL = 脏读上界"承诺不变）；去重表保证刷新窗口内只提交一次
+            maybeRefreshAhead(meta, id, key, ttlOverride, cacheNull, loader);
+        }
         Object v = c1.hit() ? decode(key, c1.json(), meta) : DECODE_FAILED;
         if (v != DECODE_FAILED) {
             return v == NULL_VALUE ? null : v;
@@ -274,6 +341,54 @@ public class TieredEntityCache {
     }
 
     /**
+     * L1 预刷新：剩余 TTL 低于 {@code cache-kit.l1.refresh-ahead} 窗口时，返回当前值的同时
+     * 提交异步刷新任务（先删本地键，再走完整 read-through：L2 → DB → putBoth）。
+     *
+     * <p>设计约束：读永远拿未过期值——不做"过期后供旧值"的经典 SWR，"L1 TTL = 脏读上界"
+     * 的一致性承诺不变，只是把过期后的回源延迟提前消化。任务去重（同键窗口内至多一个）；
+     * 刷新失败键保持原值到 TTL 自然过期，不影响正确性；队列满丢弃（下次读重新触发），
+     * 绝不阻塞读路径。刷新任务内部经 {@link #load} 的 single-flight 合并，与并发读共用回源。</p>
+     */
+    private void maybeRefreshAhead(EntityMetadata meta, Object id, String key,
+                                   Duration ttlOverride, boolean cacheNull, Supplier<Object> loader) {
+        Executor executor = refreshExecutor;
+        if (executor == null || !(l1 instanceof L1Channel l1Channel)) {
+            return;
+        }
+        long remaining = l1Channel.remainingTtlNanos(key);
+        long window = props.getL1().getRefreshAhead().toNanos();
+        if (remaining < 0 || remaining > window) {
+            return;
+        }
+        // 去重：刷新任务从提交到完成期间，该键的后续读不再重复触发（含任务自身重入的 load）
+        if (refreshInFlight.putIfAbsent(key, Boolean.TRUE) != null) {
+            return;
+        }
+        try {
+            executor.execute(() -> {
+                try {
+                    l1.evict(key);
+                    load(meta, id, ttlOverride, cacheNull, loader);
+                } catch (Throwable t) {
+                    metrics.l1RefreshAheadFailed();
+                    long now = System.nanoTime();
+                    if (now - lastRefreshFailWarnAt > 30_000_000_000L) {
+                        lastRefreshFailWarnAt = now;
+                        log.warn("L1 预刷新失败，键将保持原值至 TTL 过期: {}", key, t);
+                    }
+                } finally {
+                    refreshInFlight.remove(key);
+                }
+            });
+            metrics.l1RefreshAheadTriggered();
+        } catch (RejectedExecutionException e) {
+            // 队列已满：丢弃本次刷新（下次读重新触发），绝不阻塞读路径
+            refreshInFlight.remove(key);
+            metrics.l1RefreshAheadDropped();
+        }
+    }
+
+    /**
      * 失效：立即执行一次完整删除，并按配置调度延迟双删。
      */
     public void evict(EntityMetadata meta, Object id) {
@@ -319,14 +434,20 @@ public class TieredEntityCache {
         List<Integer> ownedIdx = new ArrayList<>();
         List<Object> ownedIds = new ArrayList<>();
         try {
-            for (int i = 0; i < n; i++) {
-                Object id = ids.get(i);
-                if (id == null) {
-                    // null 主键不进缓存链：槽直接按"不存在"完成（对齐 evictBatch 的判空）
-                    slots[i] = CompletableFuture.completedFuture(null);
-                    continue;
-                }
-                keys[i] = key(meta, id);
+                for (int i = 0; i < n; i++) {
+                    Object id = ids.get(i);
+                    if (id == null) {
+                        // null 主键不进缓存链：槽直接按"不存在"完成（对齐 evictBatch 的判空）
+                        slots[i] = CompletableFuture.completedFuture(null);
+                        continue;
+                    }
+                    String idSeg = idSegment(id);
+                    if (idSeg == null) {
+                        // 复合主键含 null 段：按无主键处理（对齐单条 load 的拒绝语义，批量不抛）
+                        slots[i] = CompletableFuture.completedFuture(null);
+                        continue;
+                    }
+                    keys[i] = keyFromSegment(meta, idSeg);
                 CompletableFuture<Object> created = new CompletableFuture<>();
                 CompletableFuture<Object> prev = inflight.putIfAbsent(keys[i], created);
                 if (prev == null) {
@@ -361,7 +482,7 @@ public class TieredEntityCache {
                 for (Object entity : fresh) {
                     Object idValue = meta.idOf(entity);
                     if (idValue != null) {
-                        freshByKey.put(String.valueOf(idValue), entity);
+                        freshByKey.put(idSegment(idValue), entity);
                     }
                 }
                 if (strictIds) {
@@ -369,12 +490,12 @@ public class TieredEntityCache {
                     // "全部查不到的条件值"若写占位，占位键不会被对应行的 insert 失效命中
                     Set<String> requestedKeys = new LinkedHashSet<>();
                     for (Object id : ownedIds) {
-                        requestedKeys.add(String.valueOf(id));
+                        requestedKeys.add(idSegment(id));
                     }
                     boolean allMatched = !fresh.isEmpty();
                     for (Object entity : fresh) {
                         Object idValue = meta.idOf(entity);
-                        if (idValue == null || !requestedKeys.contains(String.valueOf(idValue))) {
+                        if (idValue == null || !requestedKeys.contains(idSegment(idValue))) {
                             allMatched = false;
                             break;
                         }
@@ -391,7 +512,7 @@ public class TieredEntityCache {
                 }
                 for (int i = 0; i < ownedIds.size(); i++) {
                     Object id = ownedIds.get(i);
-                    Object entity = freshByKey.get(String.valueOf(id));
+                    Object entity = freshByKey.get(idSegment(id));
                     Object payload;
                     if (entity != null) {
                         String json = null;
@@ -457,9 +578,22 @@ public class TieredEntityCache {
     public void evictBatch(EntityMetadata meta, Iterable<Object> ids) {
         Set<String> keys = new LinkedHashSet<>();
         for (Object id : ids) {
-            if (id != null) {
-                keys.add(key(meta, id));
+            if (id == null) {
+                continue;
             }
+            String idSeg;
+            try {
+                idSeg = idSegment(id);
+            } catch (CacheKitException e) {
+                // 歧义复合键（含 ':'）不可能已被缓存（load 路径同样拒绝），跳过即可；
+                // 失效路径绝不打断业务写
+                log.warn("失效跳过无法成键的主键（{}）: {}", meta.entityType().getName(), e.getMessage());
+                continue;
+            }
+            if (idSeg == null) {
+                continue;
+            }
+            keys.add(keyFromSegment(meta, idSeg));
         }
         evictKeys(keys, 0);
         if (doubleDeleteScheduler != null && !keys.isEmpty()) {
@@ -539,7 +673,17 @@ public class TieredEntityCache {
         if (id == null) {
             return new CachePeek(CachePeek.State.MISS, null);
         }
-        String key = key(meta, id);
+        String idSeg;
+        try {
+            idSeg = idSegment(id);
+        } catch (CacheKitException e) {
+            // 歧义复合键不可能已被缓存（load 路径同样拒绝）：按未命中处理
+            return new CachePeek(CachePeek.State.MISS, null);
+        }
+        if (idSeg == null) {
+            return new CachePeek(CachePeek.State.MISS, null);
+        }
+        String key = keyFromSegment(meta, idSeg);
         CacheEntry c1 = l1.get(key);
         metrics.l1Lookup(c1.hit());
         statL1(meta, c1.hit());
@@ -562,10 +706,13 @@ public class TieredEntityCache {
         return new CachePeek(CachePeek.State.MISS, null);
     }
 
-    /** L2 全部调用经此降级：通道抛异常（Redis 宕机等）按未命中处理，限频告警，绝不阻断业务读写 */
+    /** L2 全部调用经此降级：通道抛异常（Redis 宕机等）按未命中处理，限频告警，绝不阻断业务读写；命中值先经解压还原 */
     private CacheEntry l2Get(EntityMetadata meta, String key) {
         try {
             CacheEntry entry = l2.get(key);
+            if (entry.hit()) {
+                entry = decodedL2Entry(key, entry);
+            }
             CacheStatsCollector s = stats;
             if (s != null) {
                 s.l2Lookup(meta.prefix(), entry.hit());
@@ -579,10 +726,40 @@ public class TieredEntityCache {
 
     private Map<String, CacheEntry> l2MultiGet(List<String> keys) {
         try {
-            return l2.multiGet(keys);
+            Map<String, CacheEntry> raw = l2.multiGet(keys);
+            if (raw == null) {
+                return null;
+            }
+            Map<String, CacheEntry> out = new LinkedHashMap<>(raw.size() * 2);
+            for (Map.Entry<String, CacheEntry> e : raw.entrySet()) {
+                CacheEntry entry = e.getValue();
+                out.put(e.getKey(), entry.hit() ? decodedL2Entry(e.getKey(), entry) : entry);
+            }
+            return out;
         } catch (Exception e) {
             warnL2Failure("multiGet", e);
             return null;
+        }
+    }
+
+    /**
+     * L2 命中值还原："gz:" 前缀 → Base64 反解 + gunzip（解压与压缩配置无关，
+     * 关闭压缩后存量压缩值仍可读）；解压失败（数据损坏/标记误判）按未命中处理，
+     * 回源成功后 putBoth 覆盖。L1 回填拿到的是原文——L1 永不存压缩值。
+     */
+    private CacheEntry decodedL2Entry(String key, CacheEntry entry) {
+        String json = entry.json();
+        if (json == null || !json.startsWith(GZ_PREFIX)) {
+            return entry;
+        }
+        try {
+            byte[] compressed = Base64.getDecoder().decode(json.substring(GZ_PREFIX.length()));
+            try (GZIPInputStream gz = new GZIPInputStream(new ByteArrayInputStream(compressed))) {
+                return CacheEntry.of(new String(gz.readAllBytes(), StandardCharsets.UTF_8));
+            }
+        } catch (Exception e) {
+            log.warn("L2 压缩值解压失败，按未命中处理: {}", key);
+            return CacheEntry.miss();
         }
     }
 
@@ -640,7 +817,20 @@ public class TieredEntityCache {
                 out.add(new CachePeek(CachePeek.State.MISS, null));
                 continue;
             }
-            String key = key(meta, id);
+            String idSeg;
+            try {
+                idSeg = idSegment(id);
+            } catch (CacheKitException e) {
+                // 歧义复合键不可能已被缓存：按未命中占位保持顺序对齐
+                out.add(new CachePeek(CachePeek.State.MISS, null));
+                continue;
+            }
+            if (idSeg == null) {
+                // 复合主键含 null 段：按无主键处理，占位保持顺序对齐
+                out.add(new CachePeek(CachePeek.State.MISS, null));
+                continue;
+            }
+            String key = keyFromSegment(meta, idSeg);
             CacheEntry c1 = l1.get(key);
             metrics.l1Lookup(c1.hit());
             statL1(meta, c1.hit());
@@ -702,10 +892,45 @@ public class TieredEntityCache {
     }
 
     private void putBoth(String key, String json, Duration l2Ttl, Duration l1Ttl) {
+        // 大值保护：超过上限的值两级都不写（与"序列化失败不缓存"同语义），读每次回源 DB，
+        // 由 L1 上限/TTL 兜底内存；计入指标供告警——持续增长说明实体含大字段
+        if (json.length() > maxValueChars) {
+            metrics.l2ValueOversized();
+            warnOversized(key, json.length());
+            return;
+        }
         if (l2 != null) {
-            l2Put(key, json, l2Ttl);
+            l2Put(key, encodeForL2(json), l2Ttl);
         }
         l1.put(key, json, l1Ttl);
+    }
+
+    private volatile long lastOversizedWarnAt;
+
+    /** 大值跳写告警（30s 限频）：该值不进任何缓存，读每次回源 DB */
+    private void warnOversized(String key, int chars) {
+        long now = System.nanoTime();
+        if (now - lastOversizedWarnAt > 30_000_000_000L) {
+            lastOversizedWarnAt = now;
+            log.warn("缓存值 {} 字符超过 l2.max-value-kb 上限，两级均跳过写入（读每次回源 DB）: {}",
+                    chars, key);
+        }
+    }
+
+    /** L2 写入编码：开启压缩且达到阈值时 gzip + Base64 + "gz:" 前缀；压缩失败退回原文，绝不阻断写路径 */
+    private String encodeForL2(String json) {
+        if (!compressionEnabled || json.length() < compressionMinChars) {
+            return json;
+        }
+        ByteArrayOutputStream buf = new ByteArrayOutputStream(json.length() / 2);
+        try (GZIPOutputStream gz = new GZIPOutputStream(buf)) {
+            gz.write(json.getBytes(StandardCharsets.UTF_8));
+        } catch (Exception e) {
+            log.warn("L2 值压缩失败，按原文存储: {}", e.getMessage());
+            return json;
+        }
+        metrics.l2ValueCompressed();
+        return GZ_PREFIX + Base64.getEncoder().encodeToString(buf.toByteArray());
     }
 
     /** 实际写入 L2 的 TTL：基准 + 随机抖动（防雪崩）；基准非正（禁用 L2 写入）时不抖动，保持语义为"跳过写入" */

@@ -12,8 +12,8 @@ import java.time.Duration;
  */
 public class CaffeineChannel implements L1Channel {
 
-    /** 槽位：JSON 值 + 创建时记录的 TTL，供 Caffeine Expiry 读取 */
-    private record Slot(String json, long ttlNanos) {
+    /** 槽位：JSON 值 + 写入时刻起算的绝对过期点（nanoTime），供 Caffeine Expiry 与剩余 TTL 读取 */
+    private record Slot(String json, long ttlNanos, long expireAtNanos) {
     }
 
     private final Cache<String, Slot> cache;
@@ -66,13 +66,24 @@ public class CaffeineChannel implements L1Channel {
     }
 
     @Override
+    public long remainingTtlNanos(String key) {
+        Slot slot = cache.getIfPresent(key);
+        if (slot == null) {
+            return -1;
+        }
+        long remaining = slot.expireAtNanos() - System.nanoTime();
+        // 到期但尚未被异步清理的条目按剩余 0 处理（getIfPresent 不触发过期判定）
+        return Math.max(0, remaining);
+    }
+
+    @Override
     public void put(String key, String json, Duration ttl) {
         // 非正 TTL 的统一语义是"跳过写入（禁用该级缓存）"，不是"永不过期"——
         // 组件的脏数据安全模型建立在 TTL 上界之上
         if (ttl == null || ttl.isZero() || ttl.isNegative()) {
             return;
         }
-        cache.put(key, new Slot(json, ttl.toNanos()));
+        cache.put(key, new Slot(json, ttl.toNanos(), System.nanoTime() + ttl.toNanos()));
     }
 
     @Override

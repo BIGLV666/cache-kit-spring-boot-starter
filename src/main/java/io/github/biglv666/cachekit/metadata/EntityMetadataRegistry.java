@@ -10,6 +10,8 @@ import org.slf4j.LoggerFactory;
 import java.lang.annotation.Annotation;
 import java.lang.reflect.Field;
 import java.time.Duration;
+import java.util.ArrayList;
+import java.util.List;
 import java.util.Map;
 import java.util.Optional;
 import java.util.concurrent.ConcurrentHashMap;
@@ -163,13 +165,14 @@ public class EntityMetadataRegistry {
             prefix = defaultTableName(type);
         }
 
-        Field idField = findIdField(type);
+        List<Field> idFields = findIdFields(type);
         // 有主键字段（@CacheId/@TableId）即视为可缓存，允许纯 MP 实体零注解接入
-        if (idField != null && (idField.isAnnotationPresent(CacheId.class)
-                || (mpTableId != null && idField.isAnnotationPresent(mpTableId)))) {
+        Field firstId = idFields.isEmpty() ? null : idFields.get(0);
+        if (firstId != null && (firstId.isAnnotationPresent(CacheId.class)
+                || (mpTableId != null && firstId.isAnnotationPresent(mpTableId)))) {
             cacheable = true;
         }
-        if (!cacheable || idField == null) {
+        if (!cacheable || idFields.isEmpty()) {
             log.debug("实体 {} 不满足缓存元数据要求，不参与缓存", type.getName());
             return null;
         }
@@ -182,8 +185,10 @@ public class EntityMetadataRegistry {
                     + "（读取方按自己的实体类型反序列化，字段子集会静默缺字段）。"
                     + "请用 @CacheEntity.prefix / @TableName 区分前缀，或移除其中一个实体的缓存接入");
         }
-        idField.setAccessible(true);
-        EntityMetadata metadata = new EntityMetadata(type, prefix, idField, ttl);
+        for (Field field : idFields) {
+            field.setAccessible(true);
+        }
+        EntityMetadata metadata = new EntityMetadata(type, prefix, idFields, ttl);
         byPrefix.put(prefix, metadata);
         return metadata;
     }
@@ -206,16 +211,24 @@ public class EntityMetadataRegistry {
 
     /**
      * 主键字段解析优先级：@CacheId → MP @TableId → 名为 id 的字段。
-     * 同一注解命中多个字段时直接抛错——猜主键会造成缓存键错位读回错行数据。
+     * 多个 @CacheId 组成复合主键（声明顺序，父类字段在后）——仅注解查询路径支持；
+     * 多个 MP @TableId 仍抛错：MyBatis-Plus 本身不支持复合主键，其自动接入路径
+     *（selectById 等）拿到的主键会与复合键段错位。
      */
-    private Field findIdField(Class<?> type) {
-        Field byCacheId = findSoleAnnotatedField(type, CacheId.class, "@CacheId");
-        if (byCacheId != null) {
+    private List<Field> findIdFields(Class<?> type) {
+        List<Field> byCacheId = findAnnotatedFields(type, CacheId.class);
+        if (!byCacheId.isEmpty()) {
             return byCacheId;
         }
         if (mpTableId != null) {
-            Field byTableId = findSoleAnnotatedField(type, mpTableId, "MP @TableId");
-            if (byTableId != null) {
+            List<Field> byTableId = findAnnotatedFields(type, mpTableId);
+            if (byTableId.size() > 1) {
+                throw new CacheKitException("实体 " + type.getName() + " 声明了多个 MP @TableId 主键字段"
+                        + "（" + byTableId.get(0).getName() + " / " + byTableId.get(1).getName() + "）："
+                        + "MyBatis-Plus 不支持复合主键。复合主键请改用多个 @CacheId"
+                        + "（仅注解查询/手动句柄路径），或只保留一个 @TableId");
+            }
+            if (!byTableId.isEmpty()) {
                 return byTableId;
             }
         }
@@ -233,20 +246,16 @@ public class EntityMetadataRegistry {
             throw new CacheKitException("实体 " + type.getName()
                     + " 声明了多个名为 id 的字段，无法确定主键：请用 @CacheId/@TableId 显式标注唯一主键");
         }
-        return byName;
+        return byName == null ? List.of() : List.of(byName);
     }
 
-    /** 返回唯一的注解主键字段；命中多个时抛错（歧义主键会缓存键错位，必须 fail-fast） */
-    private Field findSoleAnnotatedField(Class<?> type, Class<? extends Annotation> annotation, String label) {
-        Field found = null;
+    /** 收集全部注解主键字段（类层级自子类到父类、字段声明顺序），可能为空 */
+    private List<Field> findAnnotatedFields(Class<?> type, Class<? extends Annotation> annotation) {
+        List<Field> found = new ArrayList<>();
         for (Class<?> c = type; c != null && c != Object.class; c = c.getSuperclass()) {
             for (Field f : c.getDeclaredFields()) {
                 if (f.isAnnotationPresent(annotation)) {
-                    if (found != null) {
-                        throw new CacheKitException("实体 " + type.getName() + " 声明了多个 " + label
-                                + " 主键字段（" + found.getName() + " / " + f.getName() + "），请只保留一个");
-                    }
-                    found = f;
+                    found.add(f);
                 }
             }
         }

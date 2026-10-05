@@ -194,7 +194,7 @@ class BinlogDerivationTest {
         return new Event(header, data);
     }
 
-    /** 主键列序号查询的 mock JDBC 链：t_order 主键在第 1 列（真实实现查 information_schema） */
+    /** 主键列查询的 mock JDBC 链：t_order 主键 order_id 在第 1 列（真实实现查 information_schema） */
     private static DataSource pkOrdinalDataSource() throws RuntimeException {
         try {
             DataSource ds = mock(DataSource.class);
@@ -205,7 +205,8 @@ class BinlogDerivationTest {
             when(conn.prepareStatement(anyString())).thenReturn(ps);
             when(ps.executeQuery()).thenReturn(rs);
             when(rs.next()).thenReturn(true, false);
-            when(rs.getInt(1)).thenReturn(1);
+            when(rs.getString(1)).thenReturn("order_id");
+            when(rs.getInt(2)).thenReturn(1);
             return ds;
         } catch (Exception e) {
             throw new IllegalStateException(e);

@@ -42,6 +42,11 @@ class MicrometerCacheMetrics implements CacheMetricsListener {
     private final Counter binlogPositionResets;
     private final Counter binlogDeriveSkipped;
     private final Counter circuitOpened;
+    private final Counter l2ValueOversized;
+    private final Counter l2ValueCompressed;
+    private final Counter l1RefreshAheadTriggered;
+    private final Counter l1RefreshAheadDropped;
+    private final Counter l1RefreshAheadFailed;
     private final io.micrometer.core.instrument.Timer invalidationDelay;
     private final java.util.concurrent.atomic.AtomicLong streamsLagSeconds = new java.util.concurrent.atomic.AtomicLong();
     private final java.util.concurrent.atomic.AtomicLong circuitState = new java.util.concurrent.atomic.AtomicLong();
@@ -63,6 +68,11 @@ class MicrometerCacheMetrics implements CacheMetricsListener {
         this.binlogPositionResets = registry.counter("cache-kit.binlog.position.resets");
         this.binlogDeriveSkipped = registry.counter("cache-kit.binlog.derive.skipped");
         this.circuitOpened = registry.counter("cache-kit.l2.circuit.opened");
+        this.l2ValueOversized = registry.counter("cache-kit.l2.value.oversized");
+        this.l2ValueCompressed = registry.counter("cache-kit.l2.value.compressed");
+        this.l1RefreshAheadTriggered = registry.counter("cache-kit.l1.refreshahead.triggered");
+        this.l1RefreshAheadDropped = registry.counter("cache-kit.l1.refreshahead.dropped");
+        this.l1RefreshAheadFailed = registry.counter("cache-kit.l1.refreshahead.failed");
         this.invalidationDelay = io.micrometer.core.instrument.Timer
                 .builder("cache-kit.invalidation.delay")
                 .description("binlog 行事件 MySQL 时间戳 → 本实例失效应用（含时钟偏差，趋势观测用）")
@@ -166,6 +176,31 @@ class MicrometerCacheMetrics implements CacheMetricsListener {
     @Override
     public void streamsLagSeconds(long seconds) {
         streamsLagSeconds.set(seconds);
+    }
+
+    @Override
+    public void l2ValueOversized() {
+        l2ValueOversized.increment();
+    }
+
+    @Override
+    public void l2ValueCompressed() {
+        l2ValueCompressed.increment();
+    }
+
+    @Override
+    public void l1RefreshAheadTriggered() {
+        l1RefreshAheadTriggered.increment();
+    }
+
+    @Override
+    public void l1RefreshAheadDropped() {
+        l1RefreshAheadDropped.increment();
+    }
+
+    @Override
+    public void l1RefreshAheadFailed() {
+        l1RefreshAheadFailed.increment();
     }
 
     @Override

@@ -16,4 +16,13 @@ public interface L1Channel extends CacheChannel {
     default long estimatedSize() {
         return -1;
     }
+
+    /**
+     * 键的剩余 TTL（纳秒）：键不存在返回 -1；实现不支持时也返回 -1。
+     * 供 L1 预刷新（{@code cache-kit.l1.refresh-ahead}）判断"剩余寿命不足即后台刷新"，
+     * 不影响缓存语义；返回 -1 的实现自动禁用预刷新。
+     */
+    default long remainingTtlNanos(String key) {
+        return -1;
+    }
 }

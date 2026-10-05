@@ -49,6 +49,8 @@ public class MybatisPlusAutoCacheAspect {
     private final EntityMetadataRegistry registry;
     private final CacheInvalidateAspect invalidationDelegate;
     private final Map<Class<?>, Optional<Class<?>>> entityClassCache = new ConcurrentHashMap<>();
+    /** 复合主键 MP 实体已告警集合：每实体只提示一次 */
+    private final Set<Class<?>> compositeWarned = ConcurrentHashMap.newKeySet();
 
     public MybatisPlusAutoCacheAspect(TieredEntityCache tieredCache, EntityMetadataRegistry registry,
                                       CacheInvalidateAspect invalidationDelegate) {
@@ -67,6 +69,12 @@ public class MybatisPlusAutoCacheAspect {
         Class<?> entityClass = entityClassOf(pjp.getTarget());
         EntityMetadata meta = entityClass == null ? null : registry.find(entityClass);
         if (meta == null || args.length != 1 || args[0] == null) {
+            return pjp.proceed();
+        }
+        if (meta.idFields().size() > 1) {
+            // MP 本身不支持复合主键（selectById 只接受单值）：自动切面路径对复合主键实体
+            // 整体旁路，防止标量参数与复合键段错位读写错键；注解查询/手动句柄路径不受影响
+            warnCompositeEntityOnce(entityClass);
             return pjp.proceed();
         }
         switch (method.getName()) {
@@ -169,6 +177,14 @@ public class MybatisPlusAutoCacheAspect {
             return meta.idOf(arg);
         }
         return null;
+    }
+
+    private void warnCompositeEntityOnce(Class<?> entityClass) {
+        if (compositeWarned.add(entityClass)) {
+            log.warn("实体 {} 是复合主键（多个 @CacheId）：MyBatis-Plus 不支持复合主键，"
+                    + "BaseMapper 自动缓存切面对其整体旁路（读/写都不走缓存）；"
+                    + "请改用 @CachedQuery / @CacheInvalidate 注解或 EntityCache 手动句柄接入", entityClass.getName());
+        }
     }
 
     private boolean isScalar(Object value) {

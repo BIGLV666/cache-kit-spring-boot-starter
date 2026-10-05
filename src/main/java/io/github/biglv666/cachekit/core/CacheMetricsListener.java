@@ -87,4 +87,27 @@ public interface CacheMetricsListener {
      */
     default void streamsLagSeconds(long seconds) {
     }
+
+    /**
+     * L2 值超过 {@code cache-kit.l2.max-value-kb} 上限，本次两级都不写缓存（读每次回源 DB）。
+     * 持续增长说明实体含大字段，应收缩实体或调大上限（注意 Redis 内存）。
+     */
+    default void l2ValueOversized() {
+    }
+
+    /** 一个 L2 值被 gzip 压缩存储（{@code cache-kit.l2.compression-enabled} 开启时） */
+    default void l2ValueCompressed() {
+    }
+
+    /** L1 预刷新任务已提交（剩余 TTL 低于 {@code cache-kit.l1.refresh-ahead}） */
+    default void l1RefreshAheadTriggered() {
+    }
+
+    /** L1 预刷新任务因队列已满被丢弃：该键的下次读会重新触发，仅是刷新延迟 */
+    default void l1RefreshAheadDropped() {
+    }
+
+    /** L1 预刷新任务执行失败：键保持原值到 TTL 自然过期，不影响正确性 */
+    default void l1RefreshAheadFailed() {
+    }
 }

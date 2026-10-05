@@ -79,6 +79,18 @@ public class CacheKitAutoConfiguration {
             log.warn("cache-kit.l2.ttl={} 为非正值：L2 将跳过全部写入（等效禁用 Redis 二级缓存），"
                     + "读取全部回源 DB；组件不提供'永不过期'语义", props.getL2().getTtl());
         }
+        // 预刷新窗口必须 < l1.ttl：>= 时刷新刚回填的条目剩余 TTL 又低于窗口，每次读都会
+        // 触发后台刷新（等效"每次读多一次后台 DB 查询"），告警并禁用
+        java.time.Duration refreshAhead = props.getL1().getRefreshAhead();
+        if (refreshAhead != null && !refreshAhead.isZero() && !refreshAhead.isNegative()) {
+            java.time.Duration l1Ttl = props.getL1().getTtl();
+            if (l1Ttl != null && !l1Ttl.isZero() && !l1Ttl.isNegative()
+                    && refreshAhead.compareTo(l1Ttl) >= 0) {
+                log.warn("cache-kit.l1.refresh-ahead({}) 必须小于 l1.ttl({})："
+                        + "否则每次读都会触发预刷新，已禁用该功能", refreshAhead, l1Ttl);
+                props.getL1().setRefreshAhead(java.time.Duration.ZERO);
+            }
+        }
         // 键命名空间缺省派生自应用名：多服务共享 Redis 时隔离键空间，防止同名实体互相命中返回错数据
         if (props.getKeyNamespace() == null || props.getKeyNamespace().isBlank()) {
             String appName = environment.getProperty("spring.application.name");
@@ -146,6 +158,26 @@ public class CacheKitAutoConfiguration {
         return new io.github.biglv666.cachekit.core.CacheStatsCollector();
     }
 
+    /**
+     * L1 预刷新专用线程池：小固定池 + 有界队列（默认拒绝策略抛 RejectedExecutionException，
+     * TieredEntityCache 侧按 dropped 计数并在下次读重新触发）。预刷新绝不挤占业务线程，
+     * 也不允许无界积压；空闲 60s 后核心线程退出（零常驻成本），未开启预刷新时无任务。
+     */
+    @Bean(destroyMethod = "shutdown")
+    @ConditionalOnMissingBean(name = "cacheKitRefreshAheadExecutor")
+    public java.util.concurrent.ThreadPoolExecutor cacheKitRefreshAheadExecutor() {
+        java.util.concurrent.ThreadPoolExecutor executor = new java.util.concurrent.ThreadPoolExecutor(
+                2, 2, 60, java.util.concurrent.TimeUnit.SECONDS,
+                new java.util.concurrent.LinkedBlockingQueue<>(256),
+                r -> {
+                    Thread t = new Thread(r, "cache-kit-refresh-ahead");
+                    t.setDaemon(true);
+                    return t;
+                });
+        executor.allowCoreThreadTimeOut(true);
+        return executor;
+    }
+
     @Bean
     @ConditionalOnMissingBean
     public TieredEntityCache tieredEntityCache(CacheKitProperties props,
@@ -156,12 +188,23 @@ public class CacheKitAutoConfiguration {
                                                DoubleDeleteScheduler doubleDeleteScheduler,
                                                ObjectProvider<io.github.biglv666.cachekit.core.CacheKeyCustomizer> keyCustomizers,
                                                ObjectProvider<io.github.biglv666.cachekit.core.CacheMetricsListener> metrics,
-                                               ObjectProvider<io.github.biglv666.cachekit.core.CacheStatsCollector> statsCollector) {
+                                               ObjectProvider<io.github.biglv666.cachekit.core.CacheStatsCollector> statsCollector,
+                                               ObjectProvider<java.util.concurrent.ThreadPoolExecutor> refreshAheadExecutor) {
         TieredEntityCache cache = new TieredEntityCache(props, l1, l2.getIfAvailable(),
                 publisher.getIfAvailable(NoopInvalidationPublisher::new), doubleDeleteScheduler,
                 props.getKeyNamespace(), keyCustomizers.stream().toList());
         cache.setMetricsListener(metrics.getIfAvailable());
         cache.setStatsCollector(statsCollector.getIfAvailable());
+        // 预刷新窗口有效（>0，装配校验后）才接入线程池；否则功能保持关闭
+        if (props.getL1().getRefreshAhead() != null && !props.getL1().getRefreshAhead().isZero()
+                && !props.getL1().getRefreshAhead().isNegative()) {
+            java.util.concurrent.ThreadPoolExecutor executor = refreshAheadExecutor.getIfAvailable();
+            if (executor != null) {
+                cache.setRefreshAheadExecutor(executor);
+            } else {
+                log.warn("cache-kit.l1.refresh-ahead 已配置但无可用预热线程池，预刷新保持关闭");
+            }
+        }
         return cache;
     }
 
