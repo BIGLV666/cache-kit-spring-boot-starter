@@ -13,7 +13,7 @@
 
     <groupId>io.github.biglv666</groupId>
     <artifactId>cache-kit-spring-boot-starter</artifactId>
-    <version>0.3.1</version>
+    <version>0.3.3</version>
     <name>cache-kit-spring-boot-starter</name>
     <description>实体元数据驱动的三级缓存组件：Caffeine → Redis → DB read-through，MyBatis-Plus 接入零注解，秒级最终一致</description>
     <url>https://github.com/BIGLV666/cache-kit-spring-boot-starter</url>

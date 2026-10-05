@@ -11,12 +11,14 @@
 ## 特性
 
 - 三级 read-through：L1 → L2 → 方法体（查 DB），命中逐级回填
-- 缓存键由实体元数据自动推导（`表名:主键`），无需手写 SpEL 键表达式
+- 缓存键由实体元数据自动推导（`表名:主键`），无需手写 SpEL 键；复合主键（多个 `@CacheId`）按声明序 join（0.3.3+）
 - MyBatis-Plus 注解复用：`@TableName` / `@TableId` 即元数据，读写作自动接入
 - 批量 per-ID 拆解：命中直接用、缺失才回源；single-flight 防击穿、TTL 抖动防雪崩、null 占位防穿透
 - 多实例一致性：写后删缓存 + 失效广播（pub/sub 或 Streams 消费组）+ 延迟双删
 - binlog 直连失效：DBA 改库、其他服务写入也能秒级失效，无需 Canal（[文档](docs/BINLOG.md)）
 - `@CacheWarmup` 启动预热、`EntityCache` 手动句柄、`L1Channel` 可插拔 SPI
+- L1 预刷新（0.3.3+，可选）：剩余 TTL 不足即后台刷新，热点键零过期回源尖刺，一致性承诺不变
+- L2 值策略（0.3.3+）：单值大小上限防大字段撑爆 Redis；可选 gzip 压缩省内存与网络
 - 可观测性：Micrometer 计数器/命中率 Gauge/传播延迟 Timer + Grafana 面板 + `/actuator/cachekit` 运维端点（实体级命中率、双删积压、消费组滞后、熔断状态；[文档](docs/OBSERVABILITY.md)）
 - 强一致读出口：`CacheKit.withDb(...)` 作用域旁路
 
@@ -28,7 +30,7 @@
 <dependency>
     <groupId>io.github.biglv666</groupId>
     <artifactId>cache-kit-spring-boot-starter</artifactId>
-    <version>0.3.1</version>
+    <version>0.3.3</version>
 </dependency>
 ```
 
@@ -108,6 +110,8 @@ cache-kit:
   #     enabled: true   # L2 熔断器（默认开）：Redis 故障期间短路降级，免逐次阻塞到超时
   # binlog:
   #   enabled: true     # 覆盖"绕过应用的写"
+  # l1:
+  #   refresh-ahead: 5s # L1 预刷新（默认关）：剩余 TTL 不足 5s 即后台刷新，热点键无过期回源尖刺
 ```
 
 完整参数见 [docs/CONFIG.md](docs/CONFIG.md)。

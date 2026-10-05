@@ -1,5 +1,30 @@
 # 变更记录
 
+## 0.3.3（未发布）
+
+- **新增**：L1 预刷新（`cache-kit.l1.refresh-ahead`，默认关）——L1 命中且剩余 TTL 低于窗口时返回当前值
+  并异步刷新（走 L2/DB 回填），把"过期后首次读的回源延迟"提前消化。刻意不做"过期后供旧值"的经典 SWR：
+  读永远拿未过期值，"L1 TTL = 脏读上界"的一致性承诺不变；null 占位同样被预刷新（到期前重探 DB）。
+  刷新任务经 single-flight 与并发读合并回源，压测实证 32 线程 × 2s 读热点键仅 1 次回源；
+  失败吞掉（键照常 TTL 过期）、队列满丢弃下次读重触发；窗口 ≥ l1.ttl 启动告警并禁用。
+  指标 `cache-kit.l1.refreshahead.triggered/dropped/failed`
+- **新增**：L2 单值大小上限（`cache-kit.l2.max-value-kb`，默认 512KB，0 关闭）——超过的值两级都不写缓存
+  （与"序列化失败不缓存"同语义），防少量大字段撑爆 Redis 内存与网络；
+  指标 `cache-kit.l2.value.oversized` + 限频告警。**默认开启是行为变更**：默认配置下超过 512KB 的值
+  将不再进缓存（读每次回源 DB）
+- **新增**：L2 值压缩（`cache-kit.l2.compression-enabled`，默认关；阈值 `compression-min-kb` 默认 32KB）——
+  gzip + Base64 + `"gz:"` 前缀存 L2，省 Redis 内存与网络传输；L1 永远存原文，解压在 L2 读出口统一完成，
+  解压失败按未命中兜底；关闭后存量压缩值仍可读。压测：32KB JSON 编解码 ~150µs/op
+- **新增**：复合主键支持（0.3.3+，仅注解路径）——多个 `@CacheId` 按声明顺序 join ':' 组成键段；
+  `@CachedQuery` 严格推导（每个主键字段都要有同名标量参数，缺一即旁路）、实体实例参数、
+  `EntityCache` 手动句柄（`get(List.of(v1, v2))`）与 binlog 失效按联合键处理；段值含 ':' 读路径拒绝、
+  失效路径跳过（键段歧义防错位）；binlog 侧全部 PRI 列按"字段名↔列名"（驼峰↔蛇形）映射对齐字段声明序，
+  映射失败该行跳过。MP 不支持复合主键，BaseMapper 自动切面对复合主键实体整体旁路（LIMITATIONS 已改写）
+- **文档**：CONFIG/OBSERVABILITY/RESILIENCE/LIMITATIONS 增补上述特性；topic 文档英文化
+  （新增 CONFIG_EN / OBSERVABILITY_EN / RESILIENCE_EN / LIMITATIONS_EN / BOOT4-NATIVE_EN）
+- **工程**：L1Channel SPI 新增 default 方法 `remainingTtlNanos(key)`（返回 -1 的实现自动禁用预刷新，向后兼容）；
+  Grafana 面板模板新增预刷新与 L2 值策略面板
+
 ## 0.3.2（未发布）
 
 - **新增**：sharded pub/sub 广播模式（`cache-kit.broadcast.mode=sharded-pubsub`）——

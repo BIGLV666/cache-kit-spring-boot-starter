@@ -13,7 +13,12 @@ typically sub-second (within the double-delete window), worst case bounded by th
 ## Features
 
 - Three-tier read-through: L1 → L2 → method body (DB), hits back-fill level by level
-- Cache keys derived automatically from entity metadata (`table:id`) — no hand-written SpEL keys
+- Cache keys derived automatically from entity metadata (`table:id`) — no hand-written SpEL keys;
+  composite keys (multiple `@CacheId`) join in declaration order (0.3.3+)
+- L1 refresh-ahead (0.3.3+, opt-in): background refresh once remaining TTL drops below the window —
+  hot keys never pay the post-expiry reload spike, consistency guarantees unchanged
+- L2 value policy (0.3.3+): per-value size cap keeps huge fields out of Redis; optional gzip
+  compression saves memory and network
 - MyBatis-Plus annotation reuse: `@TableName` / `@TableId` are the metadata; reads and writes
   integrate automatically
 - Per-ID batch decomposition: cached hits used directly, only the missing set loads; single-flight
@@ -35,12 +40,12 @@ typically sub-second (within the double-delete window), worst case bounded by th
 <dependency>
     <groupId>io.github.biglv666</groupId>
     <artifactId>cache-kit-spring-boot-starter</artifactId>
-    <version>0.3.1</version>
+    <version>0.3.3</version>
 </dependency>
 ```
 
 Requires JDK 17+ and Spring Boot 3.5.x (Boot 4 forward-compatible, see
-[docs/BOOT4-NATIVE.md](docs/BOOT4-NATIVE.md), Chinese). L2 (Redis) and the MyBatis-Plus adapter
+[docs/BOOT4-NATIVE_EN.md](docs/BOOT4-NATIVE_EN.md)). L2 (Redis) and the MyBatis-Plus adapter
 are enabled automatically by classpath conditions.
 
 > Minimal runnable example: [cache-kit-sample](https://github.com/BIGLV666/cache-kit-sample)
@@ -89,7 +94,7 @@ int updateStatus(@Param("userId") Long userId, @Param("status") int status);
 
 Primary-key derivation is **strict**: an entity instance parameter, or a scalar parameter named
 exactly like the key field; when neither holds (condition-field lookups) it warns and goes to the
-DB — never guesses. See [limitations & FAQ](docs/LIMITATIONS.md) (Chinese).
+DB — never guesses. See [limitations & FAQ](docs/LIMITATIONS_EN.md).
 
 ### Manual control & warmup
 
@@ -116,19 +121,19 @@ cache-kit:
   #   enabled: true     # cover writes that bypass your application
 ```
 
-Full reference: [docs/CONFIG.md](docs/CONFIG.md) (Chinese).
+Full reference: [docs/CONFIG_EN.md](docs/CONFIG_EN.md).
 
 ## Documentation
 
-Topic docs live under [`docs/`](docs/). English versions available for the two most-read topics; the rest are currently Chinese:
+All topic docs have English versions under [`docs/`](docs/) (CHANGELOG remains Chinese):
 
 | Doc | Content |
 |---|---|
 | [docs/BINLOG_EN.md](docs/BINLOG_EN.md) | direct binlog invalidation: config, file/position vs GTID, reconnect semantics, troubleshooting |
 | [docs/CONSISTENCY_EN.md](docs/CONSISTENCY_EN.md) | consistency mechanism, broadcast channel choice, stress comparison, production measurements |
-| [docs/CONFIG.md](docs/CONFIG.md) | full configuration reference |
-| [docs/OBSERVABILITY.md](docs/OBSERVABILITY.md) | Micrometer metrics, alerting, Grafana dashboard |
-| [docs/RESILIENCE.md](docs/RESILIENCE.md) | resilience design: degradation, retries, backlog protection, security |
-| [docs/LIMITATIONS.md](docs/LIMITATIONS.md) | MVP boundaries, known limitations, FAQ |
-| [docs/BOOT4-NATIVE.md](docs/BOOT4-NATIVE.md) | Spring Boot 4 compatibility, GraalVM native-image |
-| [docs/CHANGELOG.md](docs/CHANGELOG.md) | release notes |
+| [docs/CONFIG_EN.md](docs/CONFIG_EN.md) | full configuration reference |
+| [docs/OBSERVABILITY_EN.md](docs/OBSERVABILITY_EN.md) | Micrometer metrics, `/actuator/cachekit`, alerting, Grafana dashboard |
+| [docs/RESILIENCE_EN.md](docs/RESILIENCE_EN.md) | resilience design: degradation, retries, value caps, security |
+| [docs/LIMITATIONS_EN.md](docs/LIMITATIONS_EN.md) | MVP boundaries, known limitations, FAQ |
+| [docs/BOOT4-NATIVE_EN.md](docs/BOOT4-NATIVE_EN.md) | Spring Boot 4 compatibility, GraalVM native-image |
+| [docs/CHANGELOG.md](docs/CHANGELOG.md) | release notes (Chinese) |

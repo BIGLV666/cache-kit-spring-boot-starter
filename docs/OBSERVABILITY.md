@@ -23,12 +23,18 @@
 | `cache-kit.l2.circuit.opened` | L2 熔断器打开次数（0.3.2+）；频繁增长说明 Redis 持续抖动，应检查网络与服务端 |
 | `cache-kit.l2.circuit.state`（Gauge） | L2 熔断器当前状态：0=CLOSED 1=HALF_OPEN 2=OPEN（0.3.2+） |
 | `cache-kit.binlog.derive.skipped` | binlog 键段还原跳过的行数（0.3.2+，自定义段无法从行数据还原时）；持续增长说明自定义器应实现 `segmentFor` |
+| `cache-kit.l1.refreshahead.triggered` | L1 预刷新提交数（0.3.3+，`l1.refresh-ahead` 开启时）；速率 ≈ 热点键数 × 1/TTL |
+| `cache-kit.l1.refreshahead.dropped` | 预刷新任务因队列满被丢弃（0.3.3+）；下次读会重新触发，仅是刷新延迟，持续增长说明预热线程不够 |
+| `cache-kit.l1.refreshahead.failed` | 预刷新任务执行失败（0.3.3+）；键保持原值到 TTL 自然过期，不影响正确性 |
+| `cache-kit.l2.value.oversized` | 超过 `l2.max-value-kb` 被两级跳写的值数（0.3.3+）；持续增长说明实体含大字段，读每次回源 DB |
+| `cache-kit.l2.value.compressed` | L2 值压缩写入数（0.3.3+，`l2.compression-enabled` 开启时） |
 
 ## 告警建议
 
 `evict.retries.exhausted`、`doubledelete.skipped`、`binlog.position.resets` 三者对应真实的数据丢失/陈旧窗口，
 持续增长即应触发排查；`l2.fallbacks{op}` 是 Redis 健康度的直接信号；`l2.circuit.state` 频繁离开 0
-说明 Redis 持续抖动；`binlog.derive.skipped` 持续增长说明自定义键段无法从行数据还原。
+说明 Redis 持续抖动；`binlog.derive.skipped` 持续增长说明自定义键段无法从行数据还原；
+`l2.value.oversized` 持续增长说明有大字段实体频繁绕过缓存（读每次回源 DB），应收缩实体或调大上限。
 
 ## 运维端点（/actuator/cachekit，0.3.2+）
 

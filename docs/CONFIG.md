@@ -11,6 +11,11 @@ cache-kit:
                            # 实际内存上限 ≈ max-weight-kb × 2KB（BMP 字符 UTF-16 双字节，中文场景）；
                            # 建议生产环境启用，例如 65536 ≈ 128MB 上限。单条 JSON 按长度/1024 计权重，最小 1
     ttl: 30s               # L1 TTL：必须显著小于 l2.ttl，是广播丢消息时的脏读上界
+    refresh-ahead: 0s      # L1 预刷新窗口（0.3.3+，默认关）：L1 命中且剩余 TTL 低于该值时，
+                           # 返回当前值 + 异步刷新（走 L2/DB 回填），把"过期后首次读的回源延迟"
+                           # 提前消化。读永远拿未过期值，"L1 TTL = 脏读上界"承诺不变；
+                           # null 占位同样会被预刷新（到期前重探 DB）。必须 < l1.ttl，
+                           # 否则启动告警并禁用；仅作用于单条读，批量查询不触发
   l2:                      # 远程缓存（Redis，类路径有 spring-data-redis 且存在 RedisConnectionFactory 时启用；
                            # 只有类没有工厂 Bean 时自动降级为 L1-only，不影响启动）
     ttl: 10m               # L2 TTL 基准；非正值（0/负数）= 跳过 L2 写入（等效禁用 Redis 缓存，启动打警告），
@@ -18,6 +23,13 @@ cache-kit:
     jitter: 60s            # TTL 随机抖动上限（防雪崩），0 关闭；基准 TTL 非正时不叠加抖动
     null-ttl: 30s          # null 占位的短 TTL（防穿透）；非正值 = 不缓存 null 占位（关闭穿透防护）
     double-delete-delay: 1s  # 延迟双删间隔；写极热键时可调小或评估回源放大
+    max-value-kb: 512      # 单值大小上限（0.3.3+，K 字符近似）：超过则该值两级都不写缓存
+                           #（读每次回源 DB，计 cache-kit.l2.value.oversized + 限频告警），
+                           # 防少量大字段撑爆 Redis 内存与网络；0 关闭上限
+    compression-enabled: false  # L2 值 gzip 压缩（0.3.3+，默认关）：达到 compression-min-kb 的值
+                           # 以 "gz:" 前缀 + Base64 存 L2，省 Redis 内存与网络传输，代价是 CPU；
+                           # L1 永远存原文；关闭后存量压缩值仍可正常读取
+    compression-min-kb: 32 # 压缩阈值（K 字符）：低于该值的压缩得不偿失，存原文
     circuit-breaker:       # L2 熔断器（0.3.2+）：连续失败后短路，省掉故障期间阻塞到命令超时的无效重试
       enabled: true        # 关闭后恢复"每次调用都真实触达 Redis、失败按未命中降级"的语义
       failure-threshold: 20  # 连续失败达该次数后熔断（成功清零）
