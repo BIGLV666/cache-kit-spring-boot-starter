@@ -38,6 +38,10 @@ jobs:
           distribution: temurin
           java-version: '17'
           cache: maven
+          # Maven 3.10 会把 _remote.repositories / maven-metadata 写进 central staging，
+          # central-publishing-maven-plugin 打包后被 Central 以
+          # "Bundle has content that does NOT have a .pom file" 拒绝；固定 3.9.16。
+          maven-version: '3.9.16'
           gpg-private-key: ${{ secrets.GPG_PRIVATE_KEY }}
           gpg-passphrase: GPG_PASSPHRASE
 
