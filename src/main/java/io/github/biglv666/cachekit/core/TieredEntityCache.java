@@ -606,9 +606,11 @@ public class TieredEntityCache {
             }
             keys.add(keyFromSegment(meta, idSeg));
         }
-        evictKeys(keys, 0);
+        // 立即删除失败不单独排重试链：延迟双删任务会再删一次并承担重试，
+        // 否则同批键会有两条重试链并行，耗尽时 evictRetryExhausted 重复计数
+        evictKeys(keys, 0, false);
         if (doubleDeleteScheduler != null && !keys.isEmpty()) {
-            doubleDeleteScheduler.schedule(() -> evictKeys(keys, 0));
+            doubleDeleteScheduler.schedule(() -> evictKeys(keys, 0, true));
         }
         CacheStatsCollector s = stats;
         if (s != null && !keys.isEmpty()) {
@@ -630,9 +632,9 @@ public class TieredEntityCache {
         if (deduped.isEmpty()) {
             return;
         }
-        evictKeys(deduped, 0);
+        evictKeys(deduped, 0, false);
         if (doubleDeleteScheduler != null) {
-            doubleDeleteScheduler.schedule(() -> evictKeys(deduped, 0));
+            doubleDeleteScheduler.schedule(() -> evictKeys(deduped, 0, true));
         }
     }
 
@@ -644,7 +646,12 @@ public class TieredEntityCache {
      * L2 删除失败（Redis 闪断）时旧值可能滞留 L2：按双删延迟调度重试（P2 兜底——
      * 否则 Redis 恢复后读会命中删除前写入的旧值且无广播），超过次数上限由 L2 TTL 兜底。
      */
-    private void evictKeys(Set<String> keys, int attempt) {
+    /**
+     * @param allowRetry 是否允许本链路在 L2 删除失败后按双删延迟重试。立即删除传 false，
+     *                   由随后调度的延迟双删任务承担重试；双删任务及其重试链传 true。
+     *                   这样同一批键只有一条重试链，重试耗尽指标不会重复计数。
+     */
+    private void evictKeys(Set<String> keys, int attempt, boolean allowRetry) {
         if (keys.isEmpty()) {
             return;
         }
@@ -667,11 +674,12 @@ public class TieredEntityCache {
         }
         publisher.publishAll(keys);
         keys.forEach(k -> metrics.broadcastSent());
-        if (!l2Deleted && doubleDeleteScheduler != null) {
+        if (!l2Deleted && allowRetry && doubleDeleteScheduler != null) {
             if (attempt < MAX_L2_EVICT_RETRIES) {
-                doubleDeleteScheduler.schedule(() -> evictKeys(keys, attempt + 1));
+                doubleDeleteScheduler.schedule(() -> evictKeys(keys, attempt + 1, true));
             } else {
-                // 重试耗尽仍失败：旧值滞留 L2，失效丢失（由 L2 TTL 上界兜底），计入指标供告警
+                // 重试耗尽仍失败：旧值滞留 L2，失效丢失（由 L2 TTL 上界兜底），计入指标供告警。
+                // 只有双删任务承担重试，因此同一批键每次失效最多计一次
                 metrics.evictRetryExhausted();
             }
         }

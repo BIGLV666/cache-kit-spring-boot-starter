@@ -22,8 +22,10 @@
   eventual-consistency semantics (bounded by L2 TTL)
 - **L2 delete-failure retry (0.3.0+)**: a DEL landing in a Redis flapping window leaves the stale
   value in L2 — the invalidation path automatically retries at the double-delete delay
-  (up to 3 times), further shrinking the loss window; exhausted retries count as
-  `cache-kit.evict.retries.exhausted`
+  (up to 3 times), further shrinking the loss window. Retries are owned by the delayed
+  double-delete task (the immediate delete no longer opens a second parallel retry chain), so
+  each failed batch counts at most once in `cache-kit.evict.retries.exhausted` (sustained growth
+  means stale values remain in L2 — invalidation loss)
 - **Serialization failure never loses data**: when an entity holds structures Jackson cannot
   serialize (self-references etc.), the result is still returned — just not cached; a cached value
   that fails to deserialize (entity drift) is treated as a miss and overwritten by the next

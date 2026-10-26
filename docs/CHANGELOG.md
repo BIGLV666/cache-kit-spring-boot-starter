@@ -8,6 +8,9 @@
   重载计数 `cache-kit.binlog.schema.reloads{reason=count|interval}`。改表结构不再需要重启进程
 - **修复**：自定义 L2 通道不支持 `multiGet` 时，`peekBatch` 的逐键兜底把 L2 实体统计记两次
   （端点命中率/计数翻倍），改为统计只记一次
+- **修复**：同一批键的"立即删除重试链"与"延迟双删重试链"各自重试，L2 持续故障时
+  `cache-kit.evict.retries.exhausted` 一次失效重复计 2 次；改为只由延迟双删任务承担重试，
+  每批失效最多计一次
 - **修复**：streams 消费组丢失后永不恢复——应用先于 Redis 启动、Redis 重启/FLUSHALL/主从切换到
   空实例、Stream 键被 maxmemory 淘汰时，`XREADGROUP` 会一直抛 `NOGROUP`，旧实现只在循环外
   创建一次组，随后永久退避。现在检测到 `NOGROUP` 自动重建组；首次启动从 `$` 读，运行中组丢失
