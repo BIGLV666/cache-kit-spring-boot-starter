@@ -143,6 +143,12 @@ public class CacheKitProperties {
         private boolean gtidEnabled = false;
         /** 初始 GTID 集（gtid-enabled=true 时生效）；缺省启动时以 @@global.gtid_executed 为起点 */
         private String gtidSet;
+        /**
+         * 表结构缓存刷新间隔：定期重新解析 information_schema 的主键列序号/列名，
+         * 感知运行期 DDL（加列到主键前会改变序号，必须重解析）。0/负值 = 只依赖
+         * TABLE_MAP 事件的列数变化检测，不做定期刷新。
+         */
+        private Duration schemaRefreshInterval = Duration.ofMinutes(10);
 
         public boolean isEnabled() {
             return enabled;
@@ -206,6 +212,15 @@ public class CacheKitProperties {
 
         public void setGtidEnabled(boolean gtidEnabled) {
             this.gtidEnabled = gtidEnabled;
+        }
+
+        public Duration getSchemaRefreshInterval() {
+            return schemaRefreshInterval;
+        }
+
+        public void setSchemaRefreshInterval(Duration schemaRefreshInterval) {
+            this.schemaRefreshInterval = schemaRefreshInterval == null
+                    ? Duration.ofMinutes(10) : schemaRefreshInterval;
         }
 
         public String getGtidSet() {

@@ -97,6 +97,8 @@ public class CacheKitEndpoint {
         if (consumer != null) {
             Map<String, Object> streams = new LinkedHashMap<>();
             streams.put("group", consumer.groupName());
+            streams.put("groupReady", consumer.isGroupReady());
+            streams.put("groupRecreated", consumer.groupRecreatedCount());
             streams.put("lagSeconds", consumer.lastLagSeconds());
             out.put("streams", streams);
         }

@@ -230,7 +230,16 @@ public class TieredEntityCache {
             throw new CacheKitException("缓存读取的复合主键含 null 段: " + meta.entityType().getName());
         }
         String key = keyFromSegment(meta, idSeg);
+        return loadResolved(meta, id, key, ttlOverride, cacheNull, loader);
+    }
 
+    /**
+     * 已解析完整键的读取主流程。预刷新任务直接复用触发读时捕获的键，绝不在后台线程
+     * 重新调用 {@link CacheKeyCustomizer#segment()}——ThreadLocal 租户上下文在刷新线程
+     * 不可用，重算会把数据写到错误（无租户段）的键。
+     */
+    private Object loadResolved(EntityMetadata meta, Object id, String key,
+                                Duration ttlOverride, boolean cacheNull, Supplier<Object> loader) {
         CacheEntry c1 = l1.get(key);
         metrics.l1Lookup(c1.hit());
         statL1(meta, c1.hit());
@@ -346,8 +355,9 @@ public class TieredEntityCache {
      *
      * <p>设计约束：读永远拿未过期值——不做"过期后供旧值"的经典 SWR，"L1 TTL = 脏读上界"
      * 的一致性承诺不变，只是把过期后的回源延迟提前消化。任务去重（同键窗口内至多一个）；
-     * 刷新失败键保持原值到 TTL 自然过期，不影响正确性；队列满丢弃（下次读重新触发），
-     * 绝不阻塞读路径。刷新任务内部经 {@link #load} 的 single-flight 合并，与并发读共用回源。</p>
+     * 任务先删本地键再回填，失败时该键下次读会回源（不会返回过期值），不影响正确性；
+     * 队列满丢弃（下次读重新触发），绝不阻塞读路径。刷新任务复用触发读时捕获的完整键
+     * （不在后台线程重算租户段），内部经 single-flight 与并发读合并回源。</p>
      */
     private void maybeRefreshAhead(EntityMetadata meta, Object id, String key,
                                    Duration ttlOverride, boolean cacheNull, Supplier<Object> loader) {
@@ -368,7 +378,8 @@ public class TieredEntityCache {
             executor.execute(() -> {
                 try {
                     l1.evict(key);
-                    load(meta, id, ttlOverride, cacheNull, loader);
+                    // 复用捕获的完整键：后台线程可能没有租户 ThreadLocal，重新推导会写错键
+                    loadResolved(meta, id, key, ttlOverride, cacheNull, loader);
                 } catch (Throwable t) {
                     metrics.l1RefreshAheadFailed();
                     long now = System.nanoTime();
@@ -708,14 +719,23 @@ public class TieredEntityCache {
 
     /** L2 全部调用经此降级：通道抛异常（Redis 宕机等）按未命中处理，限频告警，绝不阻断业务读写；命中值先经解压还原 */
     private CacheEntry l2Get(EntityMetadata meta, String key) {
+        CacheEntry entry = l2GetEntry(key);
+        CacheStatsCollector s = stats;
+        if (s != null) {
+            s.l2Lookup(meta.prefix(), entry.hit());
+        }
+        return entry;
+    }
+
+    /**
+     * 不带实体维度统计的 L2 读取（降级/解压语义与 {@link #l2Get} 一致）。
+     * 供批量兜底路径使用——该路径的全局指标与实体统计由调用方统一记录，避免重复计数。
+     */
+    private CacheEntry l2GetEntry(String key) {
         try {
             CacheEntry entry = l2.get(key);
             if (entry.hit()) {
                 entry = decodedL2Entry(key, entry);
-            }
-            CacheStatsCollector s = stats;
-            if (s != null) {
-                s.l2Lookup(meta.prefix(), entry.hit());
             }
             return entry;
         } catch (Exception e) {
@@ -848,7 +868,7 @@ public class TieredEntityCache {
                 // 通道不支持批量：逐键 get（同样降级语义；计数由下方主循环统一做，避免重复）
                 l2res = new LinkedHashMap<>();
                 for (String key : missKeys) {
-                    l2res.put(key, l2Get(meta, key));
+                    l2res.put(key, l2GetEntry(key));
                 }
             }
             for (int i = 0; i < missIdx.size(); i++) {

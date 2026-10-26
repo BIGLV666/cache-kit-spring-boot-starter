@@ -47,6 +47,10 @@ class MicrometerCacheMetrics implements CacheMetricsListener {
     private final Counter l1RefreshAheadTriggered;
     private final Counter l1RefreshAheadDropped;
     private final Counter l1RefreshAheadFailed;
+    private final Counter streamsGroupRecreated;
+    /** 按 reason 惰性注册的 binlog 表结构重载计数器（reason 集合固定） */
+    private final java.util.concurrent.ConcurrentHashMap<String, Counter> binlogSchemaReloads =
+            new java.util.concurrent.ConcurrentHashMap<>();
     private final io.micrometer.core.instrument.Timer invalidationDelay;
     private final java.util.concurrent.atomic.AtomicLong streamsLagSeconds = new java.util.concurrent.atomic.AtomicLong();
     private final java.util.concurrent.atomic.AtomicLong circuitState = new java.util.concurrent.atomic.AtomicLong();
@@ -73,6 +77,7 @@ class MicrometerCacheMetrics implements CacheMetricsListener {
         this.l1RefreshAheadTriggered = registry.counter("cache-kit.l1.refreshahead.triggered");
         this.l1RefreshAheadDropped = registry.counter("cache-kit.l1.refreshahead.dropped");
         this.l1RefreshAheadFailed = registry.counter("cache-kit.l1.refreshahead.failed");
+        this.streamsGroupRecreated = registry.counter("cache-kit.broadcast.streams.group.recreated");
         this.invalidationDelay = io.micrometer.core.instrument.Timer
                 .builder("cache-kit.invalidation.delay")
                 .description("binlog 行事件 MySQL 时间戳 → 本实例失效应用（含时钟偏差，趋势观测用）")
@@ -201,6 +206,17 @@ class MicrometerCacheMetrics implements CacheMetricsListener {
     @Override
     public void l1RefreshAheadFailed() {
         l1RefreshAheadFailed.increment();
+    }
+
+    @Override
+    public void streamsGroupRecreated() {
+        streamsGroupRecreated.increment();
+    }
+
+    @Override
+    public void binlogSchemaReload(String reason) {
+        binlogSchemaReloads.computeIfAbsent(reason == null ? "unknown" : reason,
+                r -> registryRef.counter("cache-kit.binlog.schema.reloads", "reason", r)).increment();
     }
 
     @Override

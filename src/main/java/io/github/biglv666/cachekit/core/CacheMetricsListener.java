@@ -89,6 +89,21 @@ public interface CacheMetricsListener {
     }
 
     /**
+     * Streams 运行中消费组被重新创建（Redis 重启/FLUSHALL/主从切换导致组丢失）：
+     * 消费端已自愈，并从 Stream 保留范围（受 {@code streams-maxlen} 约束）重放失效；
+     * 已超出保留范围、被裁剪掉的旧消息由 L1 TTL 兜底。持续增长说明 Redis 侧状态不稳定。
+     */
+    default void streamsGroupRecreated() {
+    }
+
+    /**
+     * binlog 表结构缓存重载（{@code reason=count} 列数变化 / {@code reason=interval} 定期刷新）：
+     * 重载后主键列序号与列名会按最新表结构重新解析。
+     */
+    default void binlogSchemaReload(String reason) {
+    }
+
+    /**
      * L2 值超过 {@code cache-kit.l2.max-value-kb} 上限，本次两级都不写缓存（读每次回源 DB）。
      * 持续增长说明实体含大字段，应收缩实体或调大上限（注意 Redis 内存）。
      */

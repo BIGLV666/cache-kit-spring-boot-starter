@@ -20,6 +20,20 @@ public interface CacheKeyCustomizer {
     String segment();
 
     /**
+     * 本自定义器是否依赖调用线程上下文（ThreadLocal/请求作用域等），默认 {@code true}。
+     *
+     * <p>该声明用于安全门禁：L1 预刷新在独立线程池执行，若 {@link #segment()} 依赖线程上下文，
+     * 后台线程无法还原调用方租户，可能把数据写到错误键（跨租户串数据）。因此自动装配在
+     * 开启 {@code cache-kit.l1.refresh-ahead} 且存在上下文敏感自定义器时，会告警并自动禁用预刷新。</p>
+     *
+     * <p>只有段值完全来自常量/不可变配置（与调用线程无关）的实现才应覆写为 {@code false}；
+     * 同时 loader 本身也必须在无租户上下文的预刷新线程中正确工作。</p>
+     */
+    default boolean contextSensitive() {
+        return true;
+    }
+
+    /**
      * binlog 失效场景的键段还原：binlog 行事件在解析线程处理、不经过应用线程，
      * {@link #segment()} 依赖的 ThreadLocal 上下文不可用。实现本方法从行数据还原键段
      * （如行的 tenant_id 列）后，binlog 对该行的失效才能拼出与读路径一致的精确键，

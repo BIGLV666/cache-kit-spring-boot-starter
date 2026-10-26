@@ -1,6 +1,7 @@
 package io.github.biglv666.cachekit.core;
 
 import io.github.biglv666.cachekit.channel.CacheChannel;
+import io.github.biglv666.cachekit.channel.CacheEntry;
 import io.github.biglv666.cachekit.config.CacheKitProperties;
 import io.github.biglv666.cachekit.exception.CacheKitException;
 import io.github.biglv666.cachekit.exception.IdMisfireException;
@@ -287,6 +288,27 @@ class TieredEntityCacheTest {
         e.setId(id);
         e.setSelf(e);   // 自引用：Jackson 无限递归，序列化必然失败
         return e;
+    }
+
+    @Test
+    void peekBatchFallbackShouldCountL2LookupOnce() {
+        // 自定义 L2 通道不支持批量：peekBatch 走逐键兜底；统计只能记一次
+        CacheChannel noMultiGetL2 = new InMemoryChannel() {
+            @Override
+            public Map<String, CacheEntry> multiGet(List<String> keys) {
+                return null;
+            }
+        };
+        CacheStatsCollector stats = new CacheStatsCollector();
+        TieredEntityCache withStats = new TieredEntityCache(new CacheKitProperties(), l1, noMultiGetL2,
+                publisher, null);
+        withStats.setStatsCollector(stats);
+
+        withStats.peekBatch(meta, List.of(1L, 2L, 3L));
+
+        CacheStatsCollector.EntityStats entityStats = stats.snapshot().get("user_entity");
+        assertThat(entityStats).isNotNull();
+        assertThat(entityStats.l2Miss()).as("逐键兜底不能重复计 L2 统计").isEqualTo(3);
     }
 
     @Test

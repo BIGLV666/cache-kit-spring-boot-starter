@@ -53,8 +53,18 @@ class BinlogInvalidationIntegrationTest {
             org.springframework.data.redis.core.StringRedisTemplate template =
                     new org.springframework.data.redis.core.StringRedisTemplate(factory);
             template.afterPropertiesSet();
-            java.util.Set<String> keys = template.keys("user_bin:*");
-            if (keys != null && !keys.isEmpty()) {
+            // 清空本类所有测试实体的 L2 键：tenant_bin_order 的键带租户段前缀，
+            // 只清 user_bin:* 会让重复运行时读到上一次残留的 a1（测试隔离缺陷）
+            java.util.Set<String> keys = new java.util.LinkedHashSet<>();
+            java.util.Set<String> userBinKeys = template.keys("user_bin:*");
+            if (userBinKeys != null) {
+                keys.addAll(userBinKeys);
+            }
+            java.util.Set<String> tenantKeys = template.keys("*tenant_bin_order*");
+            if (tenantKeys != null) {
+                keys.addAll(tenantKeys);
+            }
+            if (!keys.isEmpty()) {
                 template.delete(keys);
             }
         } finally {
@@ -119,6 +129,38 @@ class BinlogInvalidationIntegrationTest {
                 Thread.sleep(200);
             }
             assertThat(observed).as("binlog 失效后必须读到新值").isEqualTo("v1");
+        });
+    }
+
+    /**
+     * 运行期 DDL：在物理主键列前插入新列会改变主键列的 ORDINAL_POSITION，
+     * 旧的 schema 缓存若永不过期，会按旧序号取到错误列 → 失效错键或静默漏失效。
+     * 期望：TABLE_MAP 事件携带的列数变化触发重载，无需重启进程即可正确失效。
+     */
+    @Test
+    void ddlThatShiftsPrimaryKeyOrdinalShouldStillInvalidate() throws Exception {
+        runner().run(ctx -> {
+            JdbcTemplate jdbc = ctx.getBean(JdbcTemplate.class);
+            jdbc.execute("DROP TABLE IF EXISTS user_bin");
+            jdbc.execute("CREATE TABLE user_bin (user_id BIGINT PRIMARY KEY, username VARCHAR(64))");
+            jdbc.update("INSERT INTO user_bin VALUES (1, 'v0')");
+
+            BinTestUserMapper mapper = ctx.getBean(BinTestUserMapper.class);
+            assertThat(mapper.selectById(1L).getUsername()).isEqualTo("v0");
+
+            // 先制造一次 DDL 前的行事件并等待失效生效：确保监听器已缓存旧 schema
+            //（PK 序号 1）。否则监听器可能只看到 DDL 后的 TABLE_MAP，直接按新结构解析，
+            // 本用例就覆盖不到"旧序号失效"的回归。
+            jdbc.update("UPDATE user_bin SET username='seed' WHERE user_id=1");
+            assertThat(awaitUsername(mapper, 1L, "seed", 10_000))
+                    .as("DDL 前监听器必须已处理行事件").isEqualTo("seed");
+
+            // 新列插到主键列之前：user_id 的序号从 1 变为 2
+            jdbc.execute("ALTER TABLE user_bin ADD COLUMN extra VARCHAR(16) FIRST");
+            jdbc.update("UPDATE user_bin SET username='v-ddl' WHERE user_id=1");
+
+            assertThat(awaitUsername(mapper, 1L, "v-ddl", 10_000))
+                    .as("DDL 改列序后 binlog 失效仍必须命中").isEqualTo("v-ddl");
         });
     }
 
@@ -241,5 +283,19 @@ class BinlogInvalidationIntegrationTest {
                 TenantCtx.TENANT.remove();
             }
         });
+    }
+
+    /** 轮询等待读路径返回期望值（超时返回最后一次观察值，由调用方断言） */
+    private static String awaitUsername(BinTestUserMapper mapper, long id, String expected, long timeoutMs)
+            throws InterruptedException {
+        long deadline = System.currentTimeMillis() + timeoutMs;
+        String observed;
+        while (true) {
+            observed = mapper.selectById(id).getUsername();
+            if (expected.equals(observed) || System.currentTimeMillis() > deadline) {
+                return observed;
+            }
+            Thread.sleep(200);
+        }
     }
 }

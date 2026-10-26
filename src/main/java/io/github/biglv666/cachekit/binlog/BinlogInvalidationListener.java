@@ -24,6 +24,7 @@ import java.nio.charset.StandardCharsets;
 import java.sql.Connection;
 import java.sql.PreparedStatement;
 import java.sql.ResultSet;
+import java.time.Duration;
 import java.util.ArrayList;
 import java.util.LinkedHashMap;
 import java.util.LinkedHashSet;
@@ -66,6 +67,12 @@ public class BinlogInvalidationListener implements BinaryLogClient.EventListener
     /** 表 → 解析失败时刻：DB 抖动时避免每个行事件都重查 information_schema */
     private final Map<String, Long> pkLookupFailedAt = new ConcurrentHashMap<>();
     private final Map<String, Long> columnLookupFailedAt = new ConcurrentHashMap<>();
+    /** 表 → 最近一次解析到的列数（TABLE_MAP 事件携带最新列数，用于即时发现 DDL） */
+    private final Map<String, Integer> schemaColumnCounts = new ConcurrentHashMap<>();
+    /** 表 → 最近一次 schema 加载时刻（nanoTime），用于定期刷新（列序变化但列数不变） */
+    private final Map<String, Long> schemaLoadedAtNanos = new ConcurrentHashMap<>();
+    /** 表结构缓存刷新间隔；0/负值 = 只依赖 TABLE_MAP 列数变化检测 */
+    private volatile Duration schemaRefreshInterval = Duration.ofMinutes(10);
     private static final long PK_LOOKUP_COOLDOWN_NS = 30_000_000_000L;
     private volatile long lastPkLookupWarnAt;
     private volatile long lastDeriveSkippedWarnAt;
@@ -80,6 +87,14 @@ public class BinlogInvalidationListener implements BinaryLogClient.EventListener
     public void setMetricsListener(io.github.biglv666.cachekit.core.CacheMetricsListener metrics) {
         this.metrics = metrics == null ? new io.github.biglv666.cachekit.core.CacheMetricsListener() {
         } : metrics;
+    }
+
+    /**
+     * 表结构缓存刷新间隔（{@code cache-kit.binlog.schema-refresh-interval}）：
+     * 定期重查 information_schema，感知"列数不变但列序/列名变化"的 DDL；null 按默认 10 分钟。
+     */
+    public void setSchemaRefreshInterval(Duration interval) {
+        this.schemaRefreshInterval = interval == null ? Duration.ofMinutes(10) : interval;
     }
 
     public BinlogInvalidationListener(TieredEntityCache tieredCache,
@@ -127,6 +142,7 @@ public class BinlogInvalidationListener implements BinaryLogClient.EventListener
                 EventData data = event.getData();
                 if (data instanceof TableMapEventData tm) {
                     tableMap.put(tm.getTableId(), tm);
+                    maybeReloadSchema(tm);
                 }
                 return;
             }
@@ -158,6 +174,67 @@ public class BinlogInvalidationListener implements BinaryLogClient.EventListener
             // 单条事件解析失败（如未知列类型）不中断监听，TTL 上界兜底
             log.warn("binlog 事件处理失败，type={}", event.getHeader().getEventType(), t);
         }
+    }
+
+    /**
+     * 运行期表结构感知：TABLE_MAP 是每个行事件前必发的事件且携带最新列数，
+     * 列数与缓存不一致（ALTER 加/删列）时立即清空该表的 schema 缓存；
+     * 列数不变但列序可能变化（drop + add）时按 {@code schema-refresh-interval} 定期重载。
+     * 下一次行事件会惰性重查 information_schema，无需重启进程。
+     */
+    private void maybeReloadSchema(TableMapEventData tm) {
+        if (!java.util.Objects.equals(database, tm.getDatabase())) {
+            // 同一 MySQL 可能承载多个库：非本应用库的同名表不能污染 schema 缓存，
+            // 否则两库列数不一致时每个外部 TABLE_MAP 都会触发一次 information_schema 重查
+            return;
+        }
+        String table = tm.getTable();
+        if (registry.findByPrefix(table) == null) {
+            // 非缓存实体：不解析表结构，零额外查询
+            return;
+        }
+        int eventColumns = tm.getColumnTypes() == null ? -1 : tm.getColumnTypes().length;
+        Integer knownColumns = schemaColumnCounts.get(table);
+        if (knownColumns == null) {
+            // 首个 TABLE_MAP 直接以事件列数为基线：列数比较不依赖 information_schema，
+            // 避免为建基线额外查一次库（真正的列名/主键序号仍由行事件惰性查询）
+            if (eventColumns >= 0) {
+                schemaColumnCounts.put(table, eventColumns);
+                schemaLoadedAtNanos.put(table, System.nanoTime());
+            }
+            return;
+        }
+        long now = System.nanoTime();
+        boolean countChanged = eventColumns >= 0 && knownColumns != eventColumns;
+        Duration interval = schemaRefreshInterval;
+        Long loadedAt = schemaLoadedAtNanos.get(table);
+        boolean intervalElapsed = loadedAt != null && interval != null
+                && !interval.isZero() && !interval.isNegative()
+                && now - loadedAt >= interval.toNanos();
+        if (!countChanged && !intervalElapsed) {
+            return;
+        }
+        String reason = countChanged ? "count" : "interval";
+        invalidateSchema(table);
+        metrics.binlogSchemaReload(reason);
+        log.info("binlog 表结构缓存重载（{}）: 表={}, 事件列数={}, 缓存列数={}",
+                reason, table, eventColumns, knownColumns);
+        // 立即重查一次以记录新基线；查询失败时由 orderedColumns 的 30s 冷却保护
+        List<String> refreshed = orderedColumns(table);
+        if (refreshed != null) {
+            schemaColumnCounts.put(table, refreshed.size());
+            schemaLoadedAtNanos.put(table, System.nanoTime());
+        }
+    }
+
+    /** 清空单表的 schema 解析缓存与失败冷却，下一次行事件按最新表结构重新解析 */
+    private void invalidateSchema(String table) {
+        pkColumnsCache.remove(table);
+        tableColumns.remove(table);
+        pkLookupFailedAt.remove(table);
+        columnLookupFailedAt.remove(table);
+        schemaColumnCounts.remove(table);
+        schemaLoadedAtNanos.remove(table);
     }
 
     /**
@@ -448,6 +525,9 @@ public class BinlogInvalidationListener implements BinaryLogClient.EventListener
                 columnLookupFailedAt.remove(table);
                 // 空结果也按表缓存（防止查不到的表每个事件都重查）
                 tableColumns.put(table, List.copyOf(cols));
+                // 记录列数基线：TABLE_MAP 事件据此即时发现列数变化（DDL）
+                schemaColumnCounts.put(table, cols.size());
+                schemaLoadedAtNanos.put(table, System.nanoTime());
                 return cols.isEmpty() ? null : cols;
             }
         } catch (Exception e) {

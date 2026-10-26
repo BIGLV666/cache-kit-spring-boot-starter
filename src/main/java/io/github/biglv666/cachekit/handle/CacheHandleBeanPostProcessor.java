@@ -2,6 +2,7 @@ package io.github.biglv666.cachekit.handle;
 
 import io.github.biglv666.cachekit.annotation.CacheHandle;
 import io.github.biglv666.cachekit.aspect.CacheInvalidateAspect;
+import io.github.biglv666.cachekit.config.CacheKitDisabledConfiguration;
 import io.github.biglv666.cachekit.core.EntityCache;
 import io.github.biglv666.cachekit.core.TieredEntityCache;
 import io.github.biglv666.cachekit.exception.CacheKitException;

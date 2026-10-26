@@ -190,22 +190,48 @@ public class CacheKitAutoConfiguration {
                                                ObjectProvider<io.github.biglv666.cachekit.core.CacheMetricsListener> metrics,
                                                ObjectProvider<io.github.biglv666.cachekit.core.CacheStatsCollector> statsCollector,
                                                ObjectProvider<java.util.concurrent.ThreadPoolExecutor> refreshAheadExecutor) {
+        java.util.List<io.github.biglv666.cachekit.core.CacheKeyCustomizer> customizers =
+                keyCustomizers.stream().toList();
         TieredEntityCache cache = new TieredEntityCache(props, l1, l2.getIfAvailable(),
                 publisher.getIfAvailable(NoopInvalidationPublisher::new), doubleDeleteScheduler,
-                props.getKeyNamespace(), keyCustomizers.stream().toList());
+                props.getKeyNamespace(), customizers);
         cache.setMetricsListener(metrics.getIfAvailable());
         cache.setStatsCollector(statsCollector.getIfAvailable());
         // 预刷新窗口有效（>0，装配校验后）才接入线程池；否则功能保持关闭
         if (props.getL1().getRefreshAhead() != null && !props.getL1().getRefreshAhead().isZero()
                 && !props.getL1().getRefreshAhead().isNegative()) {
-            java.util.concurrent.ThreadPoolExecutor executor = refreshAheadExecutor.getIfAvailable();
-            if (executor != null) {
-                cache.setRefreshAheadExecutor(executor);
+            // 安全门禁：预刷新在独立线程执行，ThreadLocal 租户段在后台线程不可用。
+            // 上下文敏感的自定义器若继续开启预刷新，可能把数据写到无租户段/错误租户的键——
+            // 默认直接禁用并告警，只有显式声明 contextSensitive()=false 的常量段实现才放行。
+            java.util.List<String> sensitiveCustomizers = customizers.stream()
+                    .filter(CacheKitAutoConfiguration::isContextSensitive)
+                    .map(c -> c.getClass().getName())
+                    .toList();
+            if (!sensitiveCustomizers.isEmpty()) {
+                log.warn("cache-kit.l1.refresh-ahead 与上下文敏感的 CacheKeyCustomizer 不兼容"
+                        + "（后台刷新线程拿不到 ThreadLocal 租户段，可能写错键），已自动禁用预刷新；"
+                        + "受影响的自定义器: {}；若段值来自常量/不可变配置，"
+                        + "请覆写 contextSensitive() 返回 false", sensitiveCustomizers);
+                props.getL1().setRefreshAhead(java.time.Duration.ZERO);
             } else {
-                log.warn("cache-kit.l1.refresh-ahead 已配置但无可用预热线程池，预刷新保持关闭");
+                java.util.concurrent.ThreadPoolExecutor executor = refreshAheadExecutor.getIfAvailable();
+                if (executor != null) {
+                    cache.setRefreshAheadExecutor(executor);
+                } else {
+                    log.warn("cache-kit.l1.refresh-ahead 已配置但无可用预热线程池，预刷新保持关闭");
+                }
             }
         }
         return cache;
+    }
+
+    /** 自定义器是否依赖调用线程上下文；实现抛异常按 true（安全侧）处理 */
+    private static boolean isContextSensitive(io.github.biglv666.cachekit.core.CacheKeyCustomizer customizer) {
+        try {
+            return customizer.contextSensitive();
+        } catch (Throwable t) {
+            return true;
+        }
     }
 
     @Bean
@@ -591,6 +617,7 @@ public class CacheKitAutoConfiguration {
                     tieredEntityCache, registry, dataSourceProvider.getIfAvailable(), database,
                     props.getKeyNamespace(), keyCustomizers.stream().toList());
             listener.setMetricsListener(metricsProvider.getIfAvailable());
+            listener.setSchemaRefreshInterval(binlog.getSchemaRefreshInterval());
             com.github.shyiko.mysql.binlog.BinaryLogClient client =
                     new com.github.shyiko.mysql.binlog.BinaryLogClient(host, port, username, password);
             // server-id 缺省自动生成随机值：固定默认值会让同库多副本/多服务互相踢掉复制连接
