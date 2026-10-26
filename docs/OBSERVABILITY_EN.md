@@ -21,12 +21,14 @@ own `CacheMetricsListener` bean to take over.
 | `cache-kit.l1.hit.rate` / `cache-kit.l2.hit.rate` | hit-rate gauges (hit/(hit+miss), computed live from counters) |
 | `cache-kit.invalidation.delay` (Timer, p50/p99) | propagation delay from the MySQL binlog event timestamp to local invalidation application; **includes clock skew between the two hosts — trend only** |
 | `cache-kit.broadcast.streams.lag.seconds` (Gauge) | streams-mode consumer-group lag of this instance (latest invalidation event − last consumed event); sustained >0 means the consumer cannot keep up or is disconnected |
+| `cache-kit.broadcast.streams.group.recreated` | consumer-group self-healing recreations (Redis restart/FLUSHALL/failover/Redis unavailable at startup); sustained growth means unstable Redis state, and messages from before the recreation are covered by L1 TTL |
+| `cache-kit.binlog.schema.reloads{reason=count\|interval}` | binlog table-schema cache reloads: `count` = TABLE_MAP column-count change (DDL), `interval` = periodic refresh (default 10m); invalidation then uses the latest primary-key ordinals |
 | `cache-kit.l2.circuit.opened` | L2 circuit breaker openings (0.3.2+); frequent growth means persistent Redis jitter — check network and server |
 | `cache-kit.l2.circuit.state` (Gauge) | current breaker state: 0=CLOSED 1=HALF_OPEN 2=OPEN (0.3.2+) |
 | `cache-kit.binlog.derive.skipped` | rows whose binlog key-segment restoration was skipped (0.3.2+, custom segment not derivable from row data); sustained growth means the customizer should implement `segmentFor` |
 | `cache-kit.l1.refreshahead.triggered` | L1 refresh-ahead submissions (0.3.3+, with `l1.refresh-ahead` on); rate ≈ hot keys × 1/TTL |
 | `cache-kit.l1.refreshahead.dropped` | refresh tasks dropped because the queue was full (0.3.3+); the next read re-triggers, so this is only refresh delay — sustained growth means more refresh threads are needed |
-| `cache-kit.l1.refreshahead.failed` | refresh task failures (0.3.3+); the key simply lives out its TTL, no correctness impact |
+| `cache-kit.l1.refreshahead.failed` | refresh task failures (0.3.3+); the next read reloads (no expired value is served), no correctness impact |
 | `cache-kit.l2.value.oversized` | values above `l2.max-value-kb` skipped at BOTH levels (0.3.3+); sustained growth means large-field entities keep bypassing the cache (DB hit on every read) |
 | `cache-kit.l2.value.compressed` | L2 values written compressed (0.3.3+, with `l2.compression-enabled` on) |
 
@@ -48,7 +50,9 @@ automatically (exposure is governed by the host's
 - **l1**: estimated entry count, TTL, capacity bounds;
 - **l2**: TTL, null-placeholder TTL, breaker enabled flag and state (CLOSED/HALF_OPEN/OPEN/DISABLED);
 - **doubleDelete**: current backlog / cap (10,000);
-- **streams** (streams mode): consumer group name, last measured lag in seconds (−1 = not yet measured);
+- **streams** (streams mode): consumer group name, whether the group is ready (`groupReady`),
+  self-healing recreation count (`groupRecreated`), last measured lag in seconds
+  (−1 = not yet measured);
 - **entities**: per-prefix registered metadata (TTL, entity type) and cumulative stats —
   L1/L2 hits and hit rates, DB loads, null placeholders, invalidations (hit rate = hit/(hit+miss),
   −1 = no requests yet).
@@ -60,4 +64,4 @@ binlog credentials or other sensitive configuration.
 
 Template: [`grafana-dashboard.json`](grafana-dashboard.json) (import and select the Prometheus
 data source — hit rates, request/reload rates, invalidation-loss alerts, L2 degradations,
-propagation delay, refresh-ahead and L2 value-policy panels work out of the box).
+propagation delay, refresh-ahead, L2 value-policy and self-healing panels work out of the box).

@@ -26,10 +26,10 @@ typically sub-second (within the double-delete window), worst case bounded by th
 - Multi-instance consistency: write-then-evict + invalidation broadcast (pub/sub or Streams
   consumer group) + delayed double delete
 - Direct binlog invalidation: DBA updates and other services' writes invalidate within seconds,
-  no Canal ([docs/BINLOG_EN.md](docs/BINLOG_EN.md))
+  no Canal; runtime DDL changes are detected automatically ([docs/BINLOG_EN.md](docs/BINLOG_EN.md))
 - `@CacheWarmup` startup warmup, `EntityCache` manual handle, pluggable `L1Channel` SPI
 - Observability: Micrometer counters / hit-rate gauges / propagation timer + Grafana dashboard
-  ([docs/OBSERVABILITY.md](docs/OBSERVABILITY.md), Chinese)
+  ([docs/OBSERVABILITY_EN.md](docs/OBSERVABILITY_EN.md))
 - Strong-consistency escape hatch: `CacheKit.withDb(...)` scope bypass
 
 ## Quick start
@@ -119,6 +119,7 @@ cache-kit:
   #                     # windows (default pubsub)
   # binlog:
   #   enabled: true     # cover writes that bypass your application
+  #   schema-refresh-interval: 10m  # runtime DDL detection (count changes reload immediately)
 ```
 
 Full reference: [docs/CONFIG_EN.md](docs/CONFIG_EN.md).

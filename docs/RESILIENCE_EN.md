@@ -43,9 +43,21 @@
   see unexpired values. This deliberately does NOT serve stale values past expiry (classic SWR),
   so the "L1 TTL = dirty-read upper bound" promise is unchanged. Refresh tasks merge with
   concurrent readers through single-flight (anti-stampede: a stress run of 32 threads × 2s on a
-  hot key produced a single-digit number of DB loads); a failed task leaves the key to expire
-  naturally (`l1.refreshahead.failed`), and a full queue drops the task until the next read
-  (`l1.refreshahead.dropped`) — neither affects correctness
+  hot key produced a single-digit number of DB loads); the task evicts the local key before
+  refilling, so a failed task makes the next read reload (never serving an expired value;
+  `l1.refreshahead.failed`), and a full queue drops the task until the next read
+  (`l1.refreshahead.dropped`) — neither affects correctness.
+  The refresh task reuses the full key captured by the triggering read (never re-derives a tenant
+  segment on the worker thread); auto-configuration warns and disables refresh-ahead when a
+  context-sensitive `CacheKeyCustomizer` is present (constant-segment implementations may override
+  `contextSensitive()=false`)
+- **Streams consumer-group self-healing (0.3.3+)**: when the app starts before Redis, Redis
+  restarts/FLUSHALLs, a failover points at an empty instance, or the Stream key is evicted under
+  maxmemory, the consumer group disappears. On `NOGROUP` the consumer recreates the group in
+  place (first start reads from `$`; a lost runtime group replays the retained Stream from `0-0`,
+  bounded by `streams-maxlen`, idempotent DEL). No process restart is required; only messages
+  already trimmed out of the Stream are covered by L1 TTL. A growing
+  `cache-kit.broadcast.streams.group.recreated` indicates unstable Redis state
 - **Double-delete backlog protection**: when the delayed double-delete backlog exceeds 10,000
   tasks, new tasks are skipped with a rate-limited warning (staleness bounded by TTL), counted as
   `cache-kit.doubledelete.skipped`

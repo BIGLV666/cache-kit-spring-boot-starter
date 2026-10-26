@@ -20,12 +20,14 @@
 | `cache-kit.l1.hit.rate` / `cache-kit.l2.hit.rate` | 命中率 Gauge（hit/(hit+miss)，由计数器实时计算） |
 | `cache-kit.invalidation.delay`（Timer，p50/p99） | binlog 行事件 MySQL 时间戳 → 本实例失效应用的传播延迟；**含两侧时钟偏差，趋势观测用** |
 | `cache-kit.broadcast.streams.lag.seconds`（Gauge） | streams 模式本实例消费组滞后（最新失效事件 - 本组已读事件的时间戳差）；持续 >0 说明消费方处理不过来或断连 |
+| `cache-kit.broadcast.streams.group.recreated` | streams 消费组自愈重建次数（Redis 重启/FLUSHALL/主从切换/启动时 Redis 不可用）；重建时会重放 Stream 保留范围内的失效，持续增长说明 Redis 侧状态不稳定 |
+| `cache-kit.binlog.schema.reloads{reason=count\|interval}` | binlog 表结构缓存重载次数：`count` = TABLE_MAP 列数变化（DDL），`interval` = 定期刷新（默认 10m）；重载后按最新主键列序号失效 |
 | `cache-kit.l2.circuit.opened` | L2 熔断器打开次数（0.3.2+）；频繁增长说明 Redis 持续抖动，应检查网络与服务端 |
 | `cache-kit.l2.circuit.state`（Gauge） | L2 熔断器当前状态：0=CLOSED 1=HALF_OPEN 2=OPEN（0.3.2+） |
 | `cache-kit.binlog.derive.skipped` | binlog 键段还原跳过的行数（0.3.2+，自定义段无法从行数据还原时）；持续增长说明自定义器应实现 `segmentFor` |
 | `cache-kit.l1.refreshahead.triggered` | L1 预刷新提交数（0.3.3+，`l1.refresh-ahead` 开启时）；速率 ≈ 热点键数 × 1/TTL |
 | `cache-kit.l1.refreshahead.dropped` | 预刷新任务因队列满被丢弃（0.3.3+）；下次读会重新触发，仅是刷新延迟，持续增长说明预热线程不够 |
-| `cache-kit.l1.refreshahead.failed` | 预刷新任务执行失败（0.3.3+）；键保持原值到 TTL 自然过期，不影响正确性 |
+| `cache-kit.l1.refreshahead.failed` | 预刷新任务执行失败（0.3.3+）；该键下次读回源（不会返回过期值），不影响正确性 |
 | `cache-kit.l2.value.oversized` | 超过 `l2.max-value-kb` 被两级跳写的值数（0.3.3+）；持续增长说明实体含大字段，读每次回源 DB |
 | `cache-kit.l2.value.compressed` | L2 值压缩写入数（0.3.3+，`l2.compression-enabled` 开启时） |
 
@@ -44,7 +46,8 @@
 - **l1**：条目估计值、TTL、容量上限；
 - **l2**：TTL、null 占位 TTL、熔断器开关与状态（CLOSED/HALF_OPEN/OPEN/DISABLED）；
 - **doubleDelete**：当前积压任务数 / 上限（1 万）；
-- **streams**（streams 模式）：消费组名、最近量测的滞后秒数（-1 = 尚未量测）；
+- **streams**（streams 模式）：消费组名、组是否就绪（`groupReady`）、自愈重建次数
+  （`groupRecreated`）、最近量测的滞后秒数（-1 = 尚未量测）；
 - **entities**：按实体前缀合并的注册元数据（TTL、实体类型）与累计统计——
   L1/L2 命中数与命中率、DB 回源、null 占位、失效计数（命中率 = hit/(hit+miss)，
   -1 表示无请求）。
@@ -54,4 +57,5 @@
 ## Grafana 面板
 
 面板模板见 [`grafana-dashboard.json`](grafana-dashboard.json)（导入后选择 Prometheus 数据源即可，
-命中率、请求/回源速率、失效丢失告警、L2 降级、失效传播延迟 7 组面板开箱即用）。
+命中率、请求/回源速率、失效丢失告警、L2 降级、失效传播延迟、预刷新、值策略、自愈动作
+共 11 个面板开箱即用）。

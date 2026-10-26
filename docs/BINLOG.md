@@ -17,7 +17,14 @@ cache-kit:
     # host/port/database 缺省从 spring.datasource.url 解析，账号缺省用数据源账号
     # server-id 缺省自动生成随机值；同一 MySQL 上多副本部署建议显式配置
     server-id: 18365     # 同一 MySQL 上必须唯一（与 MySQL server-id 及其他副本不同）
+    schema-refresh-interval: 10m  # 表结构缓存刷新间隔（0.3.3+，0 = 关闭定期刷新）
 ```
+
+**运行期 DDL（0.3.3+）**：主键列序号来自 `information_schema` 并按表缓存。`TABLE_MAP` 事件
+携带最新列数，列数变化（`ALTER TABLE ... ADD/DROP COLUMN`）时立即清空该表缓存并重查；
+列数不变但列序变化（drop + add）由 `schema-refresh-interval` 定期重载兜底。**改表结构不再需要
+重启进程**；刷新间隔内到达的行事件仍可能按旧结构处理一次，由 TTL/延迟双删兜底。
+重载计数：`cache-kit.binlog.schema.reloads{reason=count|interval}`。
 
 注意：MySQL 8.4 移除了 `SHOW MASTER STATUS`，需 connector 0.30.0+（本 starter 默认 0.31.0）。
 

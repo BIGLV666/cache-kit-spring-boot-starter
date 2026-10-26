@@ -348,7 +348,7 @@
         "h": 8,
         "w": 12,
         "x": 0,
-        "y": 22
+        "y": 30
       },
       "targets": [
         {
@@ -392,6 +392,39 @@
         {
           "expr": "sum(rate(cache_kit_l2_value_compressed_total[5m]))",
           "legendFormat": "压缩写入",
+          "refId": "B"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "ops"
+        },
+        "overrides": []
+      }
+    },
+    {
+      "id": 11,
+      "title": "自愈动作（streams 组重建 / binlog 表结构重载）",
+      "type": "timeseries",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${DS_PROMETHEUS}"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 30
+      },
+      "targets": [
+        {
+          "expr": "increase(cache_kit_broadcast_streams_group_recreated_total[10m])",
+          "legendFormat": "streams 组重建（应恒为 0）",
+          "refId": "A"
+        },
+        {
+          "expr": "sum by (reason) (increase(cache_kit_binlog_schema_reloads_total[10m]))",
+          "legendFormat": "表结构重载 ({{reason}})",
           "refId": "B"
         }
       ],

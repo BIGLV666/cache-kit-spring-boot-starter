@@ -1,12 +1,27 @@
 # 变更记录
 
-## 0.3.3（未发布）
+## 0.3.3（2026-10-26）
 
+- **修复**：binlog 表结构缓存进程生命周期内永不过期——运行期 DDL（尤其是 `ADD COLUMN ... FIRST`
+  改变主键列序号）会导致失效错键或静默漏失效。现在 `TABLE_MAP` 事件按列数变化即时重载，
+  并新增 `cache-kit.binlog.schema-refresh-interval`（默认 10m）定期重载列序变化；
+  重载计数 `cache-kit.binlog.schema.reloads{reason=count|interval}`。改表结构不再需要重启进程
+- **修复**：自定义 L2 通道不支持 `multiGet` 时，`peekBatch` 的逐键兜底把 L2 实体统计记两次
+  （端点命中率/计数翻倍），改为统计只记一次
+- **修复**：streams 消费组丢失后永不恢复——应用先于 Redis 启动、Redis 重启/FLUSHALL/主从切换到
+  空实例、Stream 键被 maxmemory 淘汰时，`XREADGROUP` 会一直抛 `NOGROUP`，旧实现只在循环外
+  创建一次组，随后永久退避。现在检测到 `NOGROUP` 自动重建组；首次启动从 `$` 读，运行中组丢失
+  从 `0-0` 重放当前保留的 Stream（`streams-maxlen` 有界、失效 DEL 幂等），尽量补投窗口内消息。
+  新增指标 `cache-kit.broadcast.streams.group.recreated`，端点新增 `streams.groupReady/groupRecreated`
+- **修复**：L1 预刷新与 ThreadLocal 租户自定义段不兼容——刷新任务在独立线程重算键时拿不到
+  租户上下文，可能把数据写到无段键（跨租户串数据）。现在刷新任务复用触发读时捕获的完整键；
+  `CacheKeyCustomizer` 新增 `contextSensitive()`（默认 true），自动装配检测到上下文敏感自定义器
+  且开启预刷新时告警（列出受影响类名）并自动禁用；常量段实现可覆写为 false 显式放行
 - **新增**：L1 预刷新（`cache-kit.l1.refresh-ahead`，默认关）——L1 命中且剩余 TTL 低于窗口时返回当前值
   并异步刷新（走 L2/DB 回填），把"过期后首次读的回源延迟"提前消化。刻意不做"过期后供旧值"的经典 SWR：
   读永远拿未过期值，"L1 TTL = 脏读上界"的一致性承诺不变；null 占位同样被预刷新（到期前重探 DB）。
   刷新任务经 single-flight 与并发读合并回源，压测实证 32 线程 × 2s 读热点键仅 1 次回源；
-  失败吞掉（键照常 TTL 过期）、队列满丢弃下次读重触发；窗口 ≥ l1.ttl 启动告警并禁用。
+  失败吞掉（已删的 L1 键下次读回源，不会返回过期值）、队列满丢弃下次读重触发；窗口 ≥ l1.ttl 启动告警并禁用。
   指标 `cache-kit.l1.refreshahead.triggered/dropped/failed`
 - **新增**：L2 单值大小上限（`cache-kit.l2.max-value-kb`，默认 512KB，0 关闭）——超过的值两级都不写缓存
   （与"序列化失败不缓存"同语义），防少量大字段撑爆 Redis 内存与网络；
@@ -20,12 +35,12 @@
   `EntityCache` 手动句柄（`get(List.of(v1, v2))`）与 binlog 失效按联合键处理；段值含 ':' 读路径拒绝、
   失效路径跳过（键段歧义防错位）；binlog 侧全部 PRI 列按"字段名↔列名"（驼峰↔蛇形）映射对齐字段声明序，
   映射失败该行跳过。MP 不支持复合主键，BaseMapper 自动切面对复合主键实体整体旁路（LIMITATIONS 已改写）
-- **文档**：CONFIG/OBSERVABILITY/RESILIENCE/LIMITATIONS 增补上述特性；topic 文档英文化
-  （新增 CONFIG_EN / OBSERVABILITY_EN / RESILIENCE_EN / LIMITATIONS_EN / BOOT4-NATIVE_EN）
+- **文档**：CONFIG/OBSERVABILITY/RESILIENCE/LIMITATIONS/BINLOG 增补上述特性（含运行期 DDL）；
+  topic 文档英文化（新增 CONFIG_EN / OBSERVABILITY_EN / RESILIENCE_EN / LIMITATIONS_EN / BOOT4-NATIVE_EN）
 - **工程**：L1Channel SPI 新增 default 方法 `remainingTtlNanos(key)`（返回 -1 的实现自动禁用预刷新，向后兼容）；
   Grafana 面板模板新增预刷新与 L2 值策略面板
 
-## 0.3.2（未发布）
+## 0.3.2（未单独发布，已并入 0.3.3）
 
 - **新增**：sharded pub/sub 广播模式（`cache-kit.broadcast.mode=sharded-pubsub`）——
   Redis 7.0+ 的 SSUBSCRIBE/SPUBLISH 分片广播，Cluster 下失效消息只达 topic 所属分片节点

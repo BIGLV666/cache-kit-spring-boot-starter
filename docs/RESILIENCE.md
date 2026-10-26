@@ -26,8 +26,18 @@
 - **L1 预刷新（0.3.3+，默认关）**：`l1.refresh-ahead` 窗口内命中即后台刷新（先删本地键再走完整 read-through），
   读永远拿未过期值——不做"过期后供旧值"的经典 SWR，"L1 TTL = 脏读上界"承诺不变。
   刷新任务经 single-flight 与并发读合并回源（防击穿，压测实证 32 线程 × 2s 仅个位数回源）；
-  任务失败键保持原值到 TTL 自然过期（计 `l1.refreshahead.failed`），队列满丢弃下次读重触发
+  任务先删本地键再回填，失败时该键下次读回源、不会返回过期值（计 `l1.refreshahead.failed`），
+  队列满丢弃下次读重触发
   （计 `l1.refreshahead.dropped`），两者都不影响正确性
+- **streams 消费组自愈（0.3.3+）**：应用先于 Redis 启动、Redis 重启/FLUSHALL/主从切到空实例、
+  Stream 键被 maxmemory 淘汰时，消费组会丢失。消费者检测到 `NOGROUP` 后自动原地重建
+  （首次启动从 `$` 读；运行中组丢失从 `0-0` 重放当前保留的 Stream，总量受 `streams-maxlen`
+  约束，失效 DEL 幂等），无需重启进程。已超出 Stream 保留范围的旧消息由 L1 TTL 兜底；
+  计数 `cache-kit.broadcast.streams.group.recreated` 持续增长说明 Redis 侧状态不稳定
+- **L1 预刷新与租户上下文（0.3.3+）**：刷新任务复用触发读时捕获的完整键，绝不在后台线程
+  重算租户段；但 loader 若依赖 ThreadLocal 租户上下文，后台线程仍可能查错库。自动装配对
+  上下文敏感的 `CacheKeyCustomizer` 直接告警并禁用预刷新（常量段实现可覆写
+  `contextSensitive()=false` 放行），安全侧优先
 - **双删积压保护**：延迟双删任务积压超过 10000 条时跳过新任务并限频告警（脏数据由 TTL 上界兜底），
   跳过计入 `cache-kit.doubledelete.skipped` 指标
 - **广播来源校验**：订阅器只清除键前缀能匹配已知实体的广播，防任意客户端清空缓存（缓存 DoS 面）

@@ -51,6 +51,12 @@ streams for multi-instance deployments sensitive to invalidations lost during re
 - **New instances vs old groups**: group names embed `process epoch + UUID`; a new instance always
   creates its own group (starting at `$`, the latest position — a fresh L1 needs no history), so
   there is zero collision with old groups.
+- **Group-loss self-healing (0.3.3+)**: when Redis restarts/FLUSHALLs, a failover points at an
+  empty instance, or the Stream key is evicted, the group disappears. On `NOGROUP` the consumer
+  recreates it in place: a first start still reads from `$`, while a lost runtime group replays
+  the retained Stream from `0-0` (bounded by `streams-maxlen`) to recover messages published
+  during the gap; replay is idempotent DEL and already-expired messages are bounded by L1 TTL.
+  Counted by `cache-kit.broadcast.streams.group.recreated`.
 - **Real loss surface**: `MAXLEN ~ streams-maxlen` trims the whole stream — when an instance's
   group lags behind by more than that, the lagging part is permanently lost for it (equivalent
   to pubsub message loss; L1 TTL backstop applies). When offline-duration × write rate exceeds

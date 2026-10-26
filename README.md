@@ -15,7 +15,7 @@
 - MyBatis-Plus 注解复用：`@TableName` / `@TableId` 即元数据，读写作自动接入
 - 批量 per-ID 拆解：命中直接用、缺失才回源；single-flight 防击穿、TTL 抖动防雪崩、null 占位防穿透
 - 多实例一致性：写后删缓存 + 失效广播（pub/sub 或 Streams 消费组）+ 延迟双删
-- binlog 直连失效：DBA 改库、其他服务写入也能秒级失效，无需 Canal（[文档](docs/BINLOG.md)）
+- binlog 直连失效：DBA 改库、其他服务写入也能秒级失效，无需 Canal；运行期 DDL 自动感知表结构变化（[文档](docs/BINLOG.md)）
 - `@CacheWarmup` 启动预热、`EntityCache` 手动句柄、`L1Channel` 可插拔 SPI
 - L1 预刷新（0.3.3+，可选）：剩余 TTL 不足即后台刷新，热点键零过期回源尖刺，一致性承诺不变
 - L2 值策略（0.3.3+）：单值大小上限防大字段撑爆 Redis；可选 gzip 压缩省内存与网络
@@ -110,6 +110,7 @@ cache-kit:
   #     enabled: true   # L2 熔断器（默认开）：Redis 故障期间短路降级，免逐次阻塞到超时
   # binlog:
   #   enabled: true     # 覆盖"绕过应用的写"
+  #   schema-refresh-interval: 10m  # 运行期 DDL 自动感知（列数变化即时重载）
   # l1:
   #   refresh-ahead: 5s # L1 预刷新（默认关）：剩余 TTL 不足 5s 即后台刷新，热点键无过期回源尖刺
 ```
@@ -129,4 +130,4 @@ cache-kit:
 | [docs/BOOT4-NATIVE.md](docs/BOOT4-NATIVE.md) | Spring Boot 4 兼容、GraalVM native-image |
 | [docs/CHANGELOG.md](docs/CHANGELOG.md) | 版本变更记录 |
 
-English: see [README_EN.md](README_EN.md)（topic docs 目前为中文）。
+English: see [README_EN.md](README_EN.md)（topic docs 均有英文版；CHANGELOG 仅中文）。

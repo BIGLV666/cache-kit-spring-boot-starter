@@ -26,8 +26,19 @@
   Semantics note: a same-transaction write-then-read of the same key returns the **pre-commit
   stale value** from the cache (invalidation was deferred) — use the `CacheKit.withDb` bypass when
   same-transaction visibility is required
-- In binlog mode the primary-key column positions come from `information_schema`, **cached per
-  table for the process lifetime** — after a schema change, restart the process to re-parse
+- In binlog mode the primary-key column positions come from `information_schema` and are cached
+  per table: a `TABLE_MAP` column-count change triggers an **immediate reload**, while DDL that
+  changes column order without changing the count (drop + add) is covered by
+  `cache-kit.binlog.schema-refresh-interval` (default 10m) — **schema changes no longer require a
+  process restart**. DDL inside the refresh interval may still be processed with the old schema
+  for a few row events; TTL/double-delete remain the backstop
+- **L1 refresh-ahead × tenant context**: the background refresh thread has no caller ThreadLocal
+  context and is therefore incompatible with ThreadLocal-based `CacheKeyCustomizer` (it could
+  write the wrong tenant key). Auto-configuration detects context-sensitive customizers, warns,
+  and disables refresh-ahead; only implementations whose segment comes from constants/immutable
+  config should override `contextSensitive()` to `false`, and the loader itself must work without
+  tenant context. `@CacheWarmup` methods also run on a dedicated thread and must establish their
+  own tenant/datasource context
 - The binlog × `CacheKeyCustomizer` combination (mostly resolved since 0.3.2): the binlog parse
   thread has no application context, but a customizer that overrides
   `segmentFor(meta, rowData)` can restore the key segment from row data (column name → value), so

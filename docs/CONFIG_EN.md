@@ -24,7 +24,10 @@ cache-kit:
                            # "L1 TTL = dirty-read upper bound" promise is unchanged; null
                            # placeholders are refreshed too (re-probes the DB before expiry).
                            # Must be < l1.ttl (otherwise a startup warning disables it);
-                           # applies to single-key reads only, batch lookups never trigger it
+                           # applies to single-key reads only, batch lookups never trigger it.
+                           # Incompatible with ThreadLocal-based CacheKeyCustomizer (the refresh
+                           # thread has no tenant context): auto-configuration warns and disables;
+                           # constant-segment implementations can override contextSensitive()=false
   l2:                      # remote cache (Redis; enabled when spring-data-redis is on the
                            # classpath AND a RedisConnectionFactory bean exists — class without
                            # factory bean degrades to L1-only without failing startup)
@@ -90,6 +93,11 @@ cache-kit:
     username:              # falls back to the datasource credentials
     password:
     server-id:             # a random value is generated when unset; must be unique per MySQL
+    schema-refresh-interval: 10m  # table-schema cache refresh interval (0.3.3+): periodically
+                           # re-reads information_schema to detect DDL that changes column order
+                           # without changing the count; count changes are detected immediately
+                           # from TABLE_MAP events. 0/negative = count-change detection only.
+                           # Schema changes no longer require a process restart
 ```
 
 ## Environment variables / property sources

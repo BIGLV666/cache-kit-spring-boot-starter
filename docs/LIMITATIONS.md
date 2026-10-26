@@ -15,7 +15,15 @@
   （`binlog` 告警限频，TTL/双删兜底）
 - 写方法处于活动事务时，失效延迟到 **afterCommit** 执行（`cache-kit.tx.evict-after-commit`，默认开），事务回滚不失效。
   注意语义：同事务内先写后读同键会读到缓存里的**提交前旧值**（失效被延迟了），需要同事务立即可见时用 `CacheKit.withDb` 旁路读取
-- binlog 模式下主键列序号来自 `information_schema`，**按表缓存于进程生命周期内**——改表结构需重启进程后重新解析
+- binlog 模式下主键列序号来自 `information_schema`，按表缓存：`TABLE_MAP` 事件列数变化时
+  **即时重载**，列数不变但列序变化（drop + add）由 `cache-kit.binlog.schema-refresh-interval`
+  （默认 10m）定期重载兜底——**改表结构不再需要重启进程**；刷新间隔内的 DDL 仍可能按旧结构
+  处理少量行事件，由 TTL/延迟双删兜底
+- **L1 预刷新与租户上下文**：`cache-kit.l1.refresh-ahead` 的后台刷新线程没有调用方的
+  ThreadLocal 上下文，与依赖 ThreadLocal 的 `CacheKeyCustomizer` 不兼容（可能写错租户键）。
+  自动装配检测到上下文敏感自定义器时会告警并自动禁用；只有段值来自常量/不可变配置的实现
+  才应覆写 `contextSensitive()` 为 `false`，且 loader 本身也必须能在无租户上下文时正确工作。
+  `@CacheWarmup` 方法在独立预热线程执行，同样需要自行建立租户/数据源上下文
 - binlog 与 `CacheKeyCustomizer` 组合（0.3.2 起大部分已解）：binlog 解析线程没有应用上下文，
   覆写了 `segmentFor(meta, rowData)` 的自定义器可从行数据（列名 → 值）还原键段，binlog 失效按
   含段精确键命中（同时兜底无段键）；**未实现 `segmentFor` 的自定义段无法还原**，对应行的精确

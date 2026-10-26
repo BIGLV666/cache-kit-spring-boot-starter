@@ -42,6 +42,10 @@
   残留组无害：不阻塞 Stream 裁剪，只是组元数据 + PEL 引用。
 - **新实例与旧组**：组名内嵌 `进程纪元 + UUID`，新实例永远创建自己的组（从 `$` 最新位置起读，
   启动时 L1 为空不需要历史消息），与旧组零冲突。
+- **组丢失自愈（0.3.3+）**：Redis 重启/FLUSHALL/主从切到空实例/Stream 键被淘汰时组会消失。
+  消费者检测到 `NOGROUP` 后原地重建：首次启动仍从 `$` 读，运行中组丢失则从 `0-0` 重放当前
+  保留的 Stream（总量受 `streams-maxlen` 约束），尽量补投组丢失期间的消息；重放是幂等 DEL，
+  已过期的消息由 L1 TTL 兜底。计数 `cache-kit.broadcast.streams.group.recreated`。
 - **真实丢失面**：`MAXLEN ~ streams-maxlen`（默认 10000）裁剪作用于整个 Stream——
   某实例的消费组落后超过该条数时，落后部分对它永久丢失（等价 pubsub 丢消息，L1 TTL 兜底）。
   实例离线时长 × 写失效速率超过 streams-maxlen 时，streams 退化为 pubsub 语义。

@@ -15,7 +15,10 @@ cache-kit:
                            # 返回当前值 + 异步刷新（走 L2/DB 回填），把"过期后首次读的回源延迟"
                            # 提前消化。读永远拿未过期值，"L1 TTL = 脏读上界"承诺不变；
                            # null 占位同样会被预刷新（到期前重探 DB）。必须 < l1.ttl，
-                           # 否则启动告警并禁用；仅作用于单条读，批量查询不触发
+                           # 否则启动告警并禁用；仅作用于单条读，批量查询不触发。
+                           # 注意：与依赖 ThreadLocal 的 CacheKeyCustomizer 不兼容——后台
+                           # 刷新线程拿不到租户上下文，自动装配会告警并禁用；常量段实现可
+                           # 覆写 contextSensitive()=false 显式放行
   l2:                      # 远程缓存（Redis，类路径有 spring-data-redis 且存在 RedisConnectionFactory 时启用；
                            # 只有类没有工厂 Bean 时自动降级为 L1-only，不影响启动）
     ttl: 10m               # L2 TTL 基准；非正值（0/负数）= 跳过 L2 写入（等效禁用 Redis 缓存，启动打警告），
@@ -63,6 +66,10 @@ cache-kit:
     username:              # 缺省用数据源账号
     password:
     server-id:             # 缺省自动生成随机值；同一 MySQL 上必须唯一
+    schema-refresh-interval: 10m  # 表结构缓存刷新间隔（0.3.3+）：定期重查
+                           # information_schema，感知运行期 DDL（列序变化但列数不变）；
+                           # 列数变化由 TABLE_MAP 事件即时发现。0/负值 = 只靠列数变化检测。
+                           # 改表结构不再需要重启进程
 ```
 
 ## 环境变量 / 属性来源说明

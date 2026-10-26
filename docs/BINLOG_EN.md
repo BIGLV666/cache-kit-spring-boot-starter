@@ -19,7 +19,16 @@ cache-kit:
     # host/port/database default to spring.datasource.url; account defaults to the datasource account
     # server-id defaults to a random value; set it explicitly when running multiple replicas
     server-id: 18365     # must be unique per MySQL server
+    schema-refresh-interval: 10m  # table-schema cache refresh interval (0.3.3+, 0 = disable)
 ```
+
+**Runtime DDL (0.3.3+)**: primary-key ordinals come from `information_schema` and are cached per
+table. `TABLE_MAP` events carry the latest column count, so a count change (`ADD/DROP COLUMN`)
+clears that table's cache immediately and forces a re-parse; DDL that changes column order without
+changing the count (drop + add) is covered by the periodic `schema-refresh-interval` reload.
+**Schema changes no longer require a process restart**; row events arriving inside the refresh
+interval may still be processed with the old schema once, with TTL/double-delete as the backstop.
+Reloads are counted by `cache-kit.binlog.schema.reloads{reason=count|interval}`.
 
 Note: MySQL 8.4 removed `SHOW MASTER STATUS`; connector 0.30.0+ is required (this starter
 defaults to 0.31.0).
