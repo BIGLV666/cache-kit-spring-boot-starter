@@ -10,7 +10,7 @@ import org.springframework.transaction.support.TransactionSynchronizationManager
  *
  * <p>类由 {@link CacheInvalidateAspect} 按 spring-tx 存在性条件加载，非事务宿主不受影响。</p>
  */
-final class TransactionAwareEvictor {
+public final class TransactionAwareEvictor {
 
     private TransactionAwareEvictor() {
     }
@@ -18,7 +18,7 @@ final class TransactionAwareEvictor {
     /**
      * @param evictAction 失效动作；真实活动事务内注册到 afterCommit，否则立即执行
      */
-    static void evict(Runnable evictAction) {
+    public static void evict(Runnable evictAction) {
         // 判据必须是"真实事务激活 + 同步器激活"两者兼备：仅有同步器而无真实事务时
         //（手工 initSynchronization、部分消息监听容器宿主）afterCommit 永远不会触发，
         // 注册上去的失效会被静默吞掉——此时必须立即执行

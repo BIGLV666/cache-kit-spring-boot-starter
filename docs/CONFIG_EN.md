@@ -71,6 +71,9 @@ cache-kit:
                            # client only, falls back to pubsub with a warning otherwise)
     topic: cache-kit:invalidate  # broadcast topic (the Stream key in streams mode)
     streams-maxlen: 10000  # approximate Stream trim bound in streams mode (XADD MAXLEN ~)
+  generic:                 # generic value cache (0.4.0+, @CacheObject/@CacheLoad/CacheStore)
+    enabled: true          # false: @CacheLoad runs the method directly; CacheStore becomes a no-op
+    max-key-length: 512    # longer keys are SHA-256 normalized
   mp:                      # MyBatis-Plus adapter
     auto-cache-base-methods: true  # master switch: the six BaseMapper methods + IService batch
                                    # writes (saveBatch/updateBatchById/saveOrUpdateBatch);

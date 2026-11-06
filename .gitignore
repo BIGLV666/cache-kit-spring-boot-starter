@@ -8,6 +8,7 @@ target/
 .vscode/
 .settings/
 .classpath
+.factorypath
 .project
 
 .DS_Store

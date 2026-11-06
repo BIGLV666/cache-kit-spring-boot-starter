@@ -114,6 +114,30 @@ class TieredEntityCacheTest {
     }
 
     @Test
+    void nonPositiveNullTtlShouldDisableNullPlaceholder() {
+        CacheKitProperties customProps = new CacheKitProperties();
+        customProps.getL2().setJitter(Duration.ZERO);
+        customProps.getL2().setNullTtl(Duration.ZERO);
+        InMemoryChannel local = new InMemoryChannel();
+        InMemoryChannel redis = new InMemoryChannel();
+        TieredEntityCache noNegative = new TieredEntityCache(customProps, local, redis, publisher, null);
+
+        AtomicInteger loaderCount = new AtomicInteger();
+        noNegative.load(meta, 404L, null, true, () -> {
+            loaderCount.incrementAndGet();
+            return null;
+        });
+        noNegative.load(meta, 404L, null, true, () -> {
+            loaderCount.incrementAndGet();
+            return null;
+        });
+
+        assertThat(loaderCount.get()).as("null-ttl 非正：不写占位，每次读都回源").isEqualTo(2);
+        assertThat(local.store).doesNotContainKey("user_entity:404");
+        assertThat(redis.store).doesNotContainKey("user_entity:404");
+    }
+
+    @Test
     void nullResultShouldNotBeCachedWhenCacheNullDisabled() {
         AtomicInteger loaderCount = new AtomicInteger();
         cache.load(meta, 404L, null, false, () -> {

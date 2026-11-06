@@ -22,12 +22,16 @@ public class CacheKitRuntimeHints implements RuntimeHintsRegistrar {
         };
         // @ConfigurationProperties 绑定与注解元数据（元注解读取）
         hints.reflection().registerType(CacheKitProperties.class, categories);
+        hints.reflection().registerType(CacheKitProperties.Generic.class, categories);
         hints.reflection().registerType(io.github.biglv666.cachekit.annotation.CacheEntity.class, categories);
         hints.reflection().registerType(io.github.biglv666.cachekit.annotation.CacheId.class, categories);
         hints.reflection().registerType(io.github.biglv666.cachekit.annotation.CacheHandle.class, categories);
         hints.reflection().registerType(io.github.biglv666.cachekit.annotation.CacheWarmup.class, categories);
+        hints.reflection().registerType(io.github.biglv666.cachekit.annotation.CacheObject.class, categories);
+        hints.reflection().registerType(io.github.biglv666.cachekit.annotation.CacheLoad.class, categories);
         // 手动句柄与回调接口的代理
         hints.proxies().registerJdkProxy(io.github.biglv666.cachekit.core.EntityCache.class);
+        hints.proxies().registerJdkProxy(io.github.biglv666.cachekit.core.CacheStore.class);
         hints.reflection().registerType(io.github.biglv666.cachekit.exception.CacheKitException.class, categories);
     }
 }

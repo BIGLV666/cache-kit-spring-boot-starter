@@ -7,6 +7,9 @@ import io.github.biglv666.cachekit.core.DoubleDeleteScheduler;
 import io.github.biglv666.cachekit.core.L2CircuitBreaker;
 import io.github.biglv666.cachekit.core.StreamsInvalidationConsumer;
 import io.github.biglv666.cachekit.core.TieredEntityCache;
+import io.github.biglv666.cachekit.generic.GenericCacheMetadata;
+import io.github.biglv666.cachekit.generic.GenericCacheRegistry;
+import io.github.biglv666.cachekit.generic.TieredValueCache;
 import io.github.biglv666.cachekit.metadata.EntityMetadataRegistry;
 import org.springframework.beans.factory.ObjectProvider;
 import org.springframework.boot.actuate.endpoint.annotation.Endpoint;
@@ -19,7 +22,7 @@ import java.util.Map;
 import java.util.TreeMap;
 
 /**
- * {@code /actuator/cachekit} 运维端点（只读）：实体级命中率（L1/L2）、DB 回源与
+ * {@code /actuator/cachekit} 运维端点（只读）：实体级/通用值缓存命中率（L1/L2）、DB 回源与
  * null 占位计数、L1 条数估计、延迟双删积压、streams 消费组滞后、L2 熔断器状态。
  *
  * <p>安全边界：只输出实体前缀、TTL、计数与状态，**不输出任何缓存键值或缓存内容**；
@@ -43,7 +46,10 @@ public class CacheKitEndpoint {
     private final ObjectProvider<StreamsInvalidationConsumer> streamsConsumer;
     private final ObjectProvider<L2CircuitBreaker> circuitBreaker;
     private final ObjectProvider<CacheStatsCollector> stats;
+    private final ObjectProvider<GenericCacheRegistry> genericRegistry;
+    private final ObjectProvider<TieredValueCache> valueCache;
 
+    /** 兼容构造：不含通用值缓存元数据（{@code genericCaches} 仍会输出空列表/统计行）。 */
     public CacheKitEndpoint(CacheKitProperties props,
                             EntityMetadataRegistry registry,
                             ObjectProvider<TieredEntityCache> cache,
@@ -52,6 +58,34 @@ public class CacheKitEndpoint {
                             ObjectProvider<StreamsInvalidationConsumer> streamsConsumer,
                             ObjectProvider<L2CircuitBreaker> circuitBreaker,
                             ObjectProvider<CacheStatsCollector> stats) {
+        this(props, registry, cache, l1, doubleDeleteScheduler, streamsConsumer, circuitBreaker, stats,
+                null, null);
+    }
+
+    /** 兼容构造：含通用值缓存元数据（不含通用缓存实例，in-flight 仅统计实体缓存）。 */
+    public CacheKitEndpoint(CacheKitProperties props,
+                            EntityMetadataRegistry registry,
+                            ObjectProvider<TieredEntityCache> cache,
+                            ObjectProvider<L1Channel> l1,
+                            ObjectProvider<DoubleDeleteScheduler> doubleDeleteScheduler,
+                            ObjectProvider<StreamsInvalidationConsumer> streamsConsumer,
+                            ObjectProvider<L2CircuitBreaker> circuitBreaker,
+                            ObjectProvider<CacheStatsCollector> stats,
+                            ObjectProvider<GenericCacheRegistry> genericRegistry) {
+        this(props, registry, cache, l1, doubleDeleteScheduler, streamsConsumer, circuitBreaker, stats,
+                genericRegistry, null);
+    }
+
+    public CacheKitEndpoint(CacheKitProperties props,
+                            EntityMetadataRegistry registry,
+                            ObjectProvider<TieredEntityCache> cache,
+                            ObjectProvider<L1Channel> l1,
+                            ObjectProvider<DoubleDeleteScheduler> doubleDeleteScheduler,
+                            ObjectProvider<StreamsInvalidationConsumer> streamsConsumer,
+                            ObjectProvider<L2CircuitBreaker> circuitBreaker,
+                            ObjectProvider<CacheStatsCollector> stats,
+                            ObjectProvider<GenericCacheRegistry> genericRegistry,
+                            ObjectProvider<TieredValueCache> valueCache) {
         this.props = props;
         this.registry = registry;
         this.cache = cache;
@@ -60,6 +94,8 @@ public class CacheKitEndpoint {
         this.streamsConsumer = streamsConsumer;
         this.circuitBreaker = circuitBreaker;
         this.stats = stats;
+        this.genericRegistry = genericRegistry;
+        this.valueCache = valueCache;
     }
 
     @ReadOperation
@@ -104,6 +140,7 @@ public class CacheKitEndpoint {
         }
 
         out.put("entities", entities());
+        out.put("genericCaches", genericCaches());
         return out;
     }
 
@@ -123,27 +160,76 @@ public class CacheKitEndpoint {
             merged.put(meta.prefix(), row);
         }
         for (Map.Entry<String, CacheStatsCollector.EntityStats> e : statsMap.entrySet()) {
+            // 通用值缓存统计使用合成键（generic:前缀），不得混入实体列表
+            if (e.getKey().startsWith(CacheStatsCollector.GENERIC_STATS_PREFIX)) {
+                continue;
+            }
             Map<String, Object> row = merged.computeIfAbsent(e.getKey(), p -> {
                 Map<String, Object> r = new LinkedHashMap<>();
                 r.put("prefix", p);
                 return r;
             });
-            CacheStatsCollector.EntityStats s = e.getValue();
-            row.put("l1Hit", s.l1Hit());
-            row.put("l1Miss", s.l1Miss());
-            row.put("l1HitRate", s.l1HitRate());
-            row.put("l2Hit", s.l2Hit());
-            row.put("l2Miss", s.l2Miss());
-            row.put("l2HitRate", s.l2HitRate());
-            row.put("dbLoads", s.dbLoads());
-            row.put("nullPlaceholders", s.nullPlaceholders());
-            row.put("evictions", s.evictions());
+            putStats(row, e.getValue());
         }
         return new ArrayList<>(merged.values());
     }
 
+    /**
+     * 通用值缓存列表：注册元数据（原始 prefix / 值类型 / TTL）与统计按原始前缀合并。
+     * 统计键的 {@code generic:} 合成前缀在这里剥离，避免运维看到伪实体行。
+     */
+    private List<Map<String, Object>> genericCaches() {
+        CacheStatsCollector collector = stats.getIfAvailable();
+        Map<String, CacheStatsCollector.EntityStats> statsMap = collector == null
+                ? Map.of()
+                : collector.snapshot();
+        Map<String, Map<String, Object>> merged = new TreeMap<>();
+        GenericCacheRegistry registry = genericRegistry == null ? null : genericRegistry.getIfAvailable();
+        if (registry != null) {
+            for (String prefix : registry.prefixes()) {
+                GenericCacheMetadata meta = registry.findByPrefix(prefix);
+                if (meta == null) {
+                    continue;
+                }
+                Map<String, Object> row = new LinkedHashMap<>();
+                row.put("prefix", prefix);
+                row.put("valueType", meta.valueType().getSimpleName());
+                row.put("ttl", meta.ttl() == null ? null : meta.ttl().toString());
+                merged.put(prefix, row);
+            }
+        }
+        for (Map.Entry<String, CacheStatsCollector.EntityStats> e : statsMap.entrySet()) {
+            if (!e.getKey().startsWith(CacheStatsCollector.GENERIC_STATS_PREFIX)) {
+                continue;
+            }
+            String prefix = e.getKey().substring(CacheStatsCollector.GENERIC_STATS_PREFIX.length());
+            Map<String, Object> row = merged.computeIfAbsent(prefix, p -> {
+                Map<String, Object> r = new LinkedHashMap<>();
+                r.put("prefix", p);
+                return r;
+            });
+            putStats(row, e.getValue());
+        }
+        return new ArrayList<>(merged.values());
+    }
+
+    private static void putStats(Map<String, Object> row, CacheStatsCollector.EntityStats s) {
+        row.put("l1Hit", s.l1Hit());
+        row.put("l1Miss", s.l1Miss());
+        row.put("l1HitRate", s.l1HitRate());
+        row.put("l2Hit", s.l2Hit());
+        row.put("l2Miss", s.l2Miss());
+        row.put("l2HitRate", s.l2HitRate());
+        row.put("dbLoads", s.dbLoads());
+        row.put("nullPlaceholders", s.nullPlaceholders());
+        row.put("evictions", s.evictions());
+    }
+
+    /** 实体缓存 + 通用值缓存当前 single-flight 回源中的键数（通用缓存默认开启，必须一并上报） */
     private int cacheProviderCount() {
-        TieredEntityCache c = cache.getIfAvailable();
-        return c == null ? 0 : c.inflightCount();
+        TieredEntityCache entityCache = cache.getIfAvailable();
+        TieredValueCache genericCache = valueCache == null ? null : valueCache.getIfAvailable();
+        return (entityCache == null ? 0 : entityCache.inflightCount())
+                + (genericCache == null ? 0 : genericCache.inflightCount());
     }
 }

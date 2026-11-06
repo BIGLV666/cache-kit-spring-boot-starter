@@ -1,6 +1,7 @@
 package io.github.biglv666.cachekit.core;
 
 import io.github.biglv666.cachekit.channel.CacheChannel;
+import io.github.biglv666.cachekit.generic.GenericCacheRegistry;
 import io.github.biglv666.cachekit.metadata.EntityMetadataRegistry;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -19,13 +20,24 @@ public class BroadcastApplier {
 
     private final CacheChannel l1;
     private final EntityMetadataRegistry registry;
+    private final GenericCacheRegistry genericRegistry;
     private final String namespace;
     private volatile CacheMetricsListener metrics = new CacheMetricsListener() {
     };
 
+    public BroadcastApplier(CacheChannel l1, EntityMetadataRegistry registry) {
+        this(l1, registry, null, "");
+    }
+
     public BroadcastApplier(CacheChannel l1, EntityMetadataRegistry registry, String namespace) {
+        this(l1, registry, null, namespace);
+    }
+
+    public BroadcastApplier(CacheChannel l1, EntityMetadataRegistry registry,
+                            GenericCacheRegistry genericRegistry, String namespace) {
         this.l1 = l1;
         this.registry = registry;
+        this.genericRegistry = genericRegistry;
         this.namespace = namespace == null ? "" : namespace;
     }
 
@@ -45,6 +57,9 @@ public class BroadcastApplier {
         if (key == null || key.isBlank()) {
             return false;
         }
+        if (GenericKeyCodec.isGenericMessage(key)) {
+            return applyGeneric(GenericKeyCodec.unwrap(key));
+        }
         // 键形如 [customizer段:]namespace:前缀:id，主键段可能含 ':'，不能按冒号切分——
         // 由注册表按"实体前缀作为完整段 + namespace 紧邻校验"解析，
         // 与 TieredEntityCache.key() 的组装规则对齐（含 CacheKeyCustomizer 段的键也能匹配）。
@@ -57,6 +72,22 @@ public class BroadcastApplier {
         metrics.broadcastReceived(true);
         l1.evict(key);
         log.debug("收到失效广播，已清除本地 L1: {}", key);
+        return true;
+    }
+
+    /**
+     * 通用缓存失效：白名单按已注册 {@code @CacheObject} 前缀校验，
+     * 未知前缀/namespace 不匹配一律忽略（防任意 Redis 客户端清空缓存）。
+     */
+    private boolean applyGeneric(String key) {
+        if (genericRegistry == null || genericRegistry.findByBroadcastKey(key, namespace) == null) {
+            metrics.broadcastReceived(false);
+            log.debug("收到无法匹配已知通用缓存前缀的广播，忽略: {}", key);
+            return false;
+        }
+        metrics.broadcastReceived(true);
+        l1.evict(key);
+        log.debug("收到通用缓存失效广播，已清除本地 L1: {}", key);
         return true;
     }
 }

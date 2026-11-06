@@ -47,6 +47,7 @@ public class CacheKitProperties {
     private final Binlog binlog = new Binlog();
     private final Tx tx = new Tx();
     private final Warmup warmup = new Warmup();
+    private final Generic generic = new Generic();
 
     public boolean isEnabled() {
         return enabled;
@@ -78,6 +79,40 @@ public class CacheKitProperties {
 
     public Warmup getWarmup() {
         return warmup;
+    }
+
+    public Generic getGeneric() {
+        return generic;
+    }
+
+    /** 通用值缓存（@CacheObject/@CacheLoad/CacheStore）配置 */
+    public static class Generic {
+        /**
+         * 是否启用通用值缓存。关闭后 @CacheLoad 方法直接执行方法体（无缓存），
+         * @CacheHandle 注入的 CacheStore 为空操作句柄。
+         */
+        private boolean enabled = true;
+        /**
+         * 用户 key 最大长度：超过后按 SHA-256 归一化为固定长度键，
+         * 防止超长 key 撑大 Redis/日志。默认 512。
+         */
+        private int maxKeyLength = 512;
+
+        public boolean isEnabled() {
+            return enabled;
+        }
+
+        public void setEnabled(boolean enabled) {
+            this.enabled = enabled;
+        }
+
+        public int getMaxKeyLength() {
+            return maxKeyLength;
+        }
+
+        public void setMaxKeyLength(int maxKeyLength) {
+            this.maxKeyLength = maxKeyLength <= 0 ? 512 : maxKeyLength;
+        }
     }
 
     public Binlog getBinlog() {

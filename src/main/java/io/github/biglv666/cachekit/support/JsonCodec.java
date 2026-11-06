@@ -1,8 +1,11 @@
 package io.github.biglv666.cachekit.support;
 
 import com.fasterxml.jackson.databind.DeserializationFeature;
+import com.fasterxml.jackson.databind.JavaType;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import io.github.biglv666.cachekit.exception.CacheKitException;
+
+import java.lang.reflect.Type;
 
 /**
  * JSON 编解码：两个缓存通道（L1/L2）统一存 JSON 字符串。
@@ -49,5 +52,38 @@ public final class JsonCodec {
         } catch (Exception e) {
             return null;
         }
+    }
+
+    /**
+     * 反序列化 JSON 为完整泛型类型（如 {@code List<Foo>}、{@code Map<String, Foo>}）。
+     * 失败返回 null 由调用方按未命中处理。
+     */
+    public static <T> T read(String json, JavaType type) {
+        try {
+            return MAPPER.readValue(json, type);
+        } catch (Exception e) {
+            return null;
+        }
+    }
+
+    /**
+     * 构造 Jackson {@link JavaType}：供通用缓存在方法首次调用时缓存返回类型，
+     * 避免每次读写重复解析泛型。
+     */
+    public static JavaType constructType(Type type) {
+        return MAPPER.getTypeFactory().constructType(type);
+    }
+
+    /**
+     * 构造参数化 {@link JavaType}（如 {@code List<Foo>}）。用于把已解析的泛型实参
+     * 重新组装成完整类型，避免再次解析原始 {@link Type} 时丢失类型变量。
+     */
+    public static JavaType constructParametricType(Class<?> rawType, JavaType... typeArguments) {
+        return MAPPER.getTypeFactory().constructParametricType(rawType, typeArguments);
+    }
+
+    /** 构造数组 {@link JavaType}，保留组件类型（如 {@code Foo[]}）。 */
+    public static JavaType constructArrayType(JavaType componentType) {
+        return MAPPER.getTypeFactory().constructArrayType(componentType);
     }
 }

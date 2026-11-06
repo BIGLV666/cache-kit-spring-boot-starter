@@ -32,6 +32,11 @@
 
 ## 已知限制与说明
 
+- **通用值缓存不接 binlog**（0.4.0+）：`@CacheObject`/`@CacheLoad` 缓存的任意值没有表/主键映射，
+  框架无法根据数据库写入自动失效；业务需通过 `CacheStore.evict/refresh` 显式失效，或依赖 TTL。
+  通用缓存 MVP 也不提供 `evictAll`/按前缀清空（避免 L2 `SCAN` 风险）
+- **通用缓存 key 必须显式**：`@CacheLoad.key` 为必填 SpEL，结果 null/空字符串直接抛异常，绝不猜测；
+  同一 `@CacheObject.prefix` 只能绑定一个值类型，冲突启动 fail-fast；方法自调用不经过切面
 - **binlog 与事务时序**：MySQL 的 binlog 事件在 **COMMIT 时**才写入（事务内只进 binlog cache），监听端天然只见提交后数据，
   不存在"提交前触发失效"的竞态；残余的读回填竞态由双删 + TTL 兜底
 - **null 占位与 INSERT**：应用内 `mapper.insert()` 自动清除对应"已确认不存在"占位（新数据立即可见）；

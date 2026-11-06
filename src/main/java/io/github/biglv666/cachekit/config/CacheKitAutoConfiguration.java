@@ -19,6 +19,10 @@ import io.github.biglv666.cachekit.core.NoopInvalidationPublisher;
 import io.github.biglv666.cachekit.core.RedisInvalidationPublisher;
 import io.github.biglv666.cachekit.core.TieredEntityCache;
 import io.github.biglv666.cachekit.exception.CacheKitException;
+import io.github.biglv666.cachekit.generic.GenericCacheAspect;
+import io.github.biglv666.cachekit.generic.GenericCacheLoadBeanPostProcessor;
+import io.github.biglv666.cachekit.generic.GenericCacheRegistry;
+import io.github.biglv666.cachekit.generic.TieredValueCache;
 import io.github.biglv666.cachekit.handle.CacheHandleBeanPostProcessor;
 import io.github.biglv666.cachekit.metadata.EntityMetadataRegistry;
 import org.slf4j.Logger;
@@ -236,6 +240,53 @@ public class CacheKitAutoConfiguration {
 
     @Bean
     @ConditionalOnMissingBean
+    @ConditionalOnProperty(prefix = "cache-kit.generic", name = "enabled", havingValue = "true", matchIfMissing = true)
+    public GenericCacheRegistry genericCacheRegistry() {
+        return new GenericCacheRegistry();
+    }
+
+    @Bean
+    @ConditionalOnMissingBean
+    @ConditionalOnProperty(prefix = "cache-kit.generic", name = "enabled", havingValue = "true", matchIfMissing = true)
+    public TieredValueCache tieredValueCache(CacheKitProperties props,
+                                             L1Channel l1,
+                                             ObjectProvider<RedisChannel> l2,
+                                             ObjectProvider<InvalidationPublisher> publisher,
+                                             DoubleDeleteScheduler doubleDeleteScheduler,
+                                             ObjectProvider<io.github.biglv666.cachekit.core.CacheKeyCustomizer> keyCustomizers,
+                                             ObjectProvider<io.github.biglv666.cachekit.core.CacheMetricsListener> metrics,
+                                             ObjectProvider<io.github.biglv666.cachekit.core.CacheStatsCollector> statsCollector) {
+        TieredValueCache cache = new TieredValueCache(props, l1, l2.getIfAvailable(),
+                publisher.getIfAvailable(NoopInvalidationPublisher::new), doubleDeleteScheduler,
+                props.getKeyNamespace(), keyCustomizers.stream().toList());
+        cache.setMetricsListener(metrics.getIfAvailable());
+        cache.setStatsCollector(statsCollector.getIfAvailable());
+        return cache;
+    }
+
+    @Bean
+    @ConditionalOnMissingBean
+    @ConditionalOnProperty(prefix = "cache-kit.generic", name = "enabled", havingValue = "true", matchIfMissing = true)
+    public GenericCacheAspect genericCacheAspect(TieredValueCache tieredValueCache,
+                                                 GenericCacheRegistry genericCacheRegistry) {
+        return new GenericCacheAspect(tieredValueCache, genericCacheRegistry);
+    }
+
+    /**
+     * 启动期注册 {@code @CacheLoad} 元数据：值类型无法解析/prefix 冲突/key 为空时 fail-fast，
+     * 并提前把通用前缀加入广播白名单。通用缓存关闭时 registry 不存在，扫描自动跳过。
+     *
+     * <p>BPP 阶段只收集候选 bean 类，待单例全部实例化后才扫描注册——避免在
+     * BeanPostProcessor 注册期提前创建 {@code GenericCacheRegistry}（BeanPostProcessorChecker 警告）。</p>
+     */
+    @Bean
+    public static GenericCacheLoadBeanPostProcessor genericCacheLoadBeanPostProcessor(
+            ObjectProvider<GenericCacheRegistry> registryProvider) {
+        return new GenericCacheLoadBeanPostProcessor(registryProvider);
+    }
+
+    @Bean
+    @ConditionalOnMissingBean
     @ConditionalOnProperty(prefix = "cache-kit.warmup", name = "enabled", havingValue = "true", matchIfMissing = true)
     public io.github.biglv666.cachekit.warmup.CacheWarmupRunner cacheKitWarmupRunner(
             org.springframework.context.ApplicationContext applicationContext, CacheKitProperties props) {
@@ -263,8 +314,12 @@ public class CacheKitAutoConfiguration {
             BeanFactory beanFactory,
             ObjectProvider<TieredEntityCache> tieredEntityCache,
             EntityMetadataRegistry registry,
-            ObjectProvider<CacheInvalidateAspect> invalidationAspect) {
-        return new CacheHandleBeanPostProcessor(beanFactory, tieredEntityCache, registry, invalidationAspect);
+            ObjectProvider<CacheInvalidateAspect> invalidationAspect,
+            ObjectProvider<TieredValueCache> tieredValueCache,
+            ObjectProvider<GenericCacheRegistry> genericCacheRegistry,
+            CacheKitProperties props) {
+        return new CacheHandleBeanPostProcessor(beanFactory, tieredEntityCache, registry, invalidationAspect,
+                tieredValueCache, genericCacheRegistry, props.getTx().isEvictAfterCommit());
     }
 
     /**
@@ -359,11 +414,13 @@ public class CacheKitAutoConfiguration {
                                                    L1Channel l1Channel,
                                                    EntityMetadataRegistry registry,
                                                    CacheKitProperties props,
+                                                   ObjectProvider<GenericCacheRegistry> genericRegistryProvider,
                                                    ObjectProvider<io.github.biglv666.cachekit.core.CacheMetricsListener> metricsProvider) {
             String mode = props.getBroadcast().getMode();
             io.github.biglv666.cachekit.core.BroadcastApplier applier =
                     new io.github.biglv666.cachekit.core.BroadcastApplier(
-                            l1Channel, registry, props.getKeyNamespace());
+                            l1Channel, registry, genericRegistryProvider.getIfAvailable(),
+                            props.getKeyNamespace());
             applier.setMetricsListener(metricsProvider.getIfAvailable());
             if ("streams".equalsIgnoreCase(mode)) {
                 io.github.biglv666.cachekit.core.StreamsInvalidationConsumer consumer =
@@ -383,7 +440,7 @@ public class CacheKitAutoConfiguration {
             // 非 Lettuce 的 sharded-pubsub 与 pubsub（默认）都走监听容器
             RedisMessageListenerContainer container = new RedisMessageListenerContainer();
             container.setConnectionFactory(l2Channel.template().getConnectionFactory());
-            InvalidationSubscriber subscriber = new InvalidationSubscriber(l1Channel, registry, props.getKeyNamespace());
+            InvalidationSubscriber subscriber = new InvalidationSubscriber(applier);
             subscriber.setMetricsListener(metricsProvider.getIfAvailable());
             container.addMessageListener(subscriber,
                     new ChannelTopic(props.getBroadcast().getTopic()));
@@ -522,9 +579,12 @@ public class CacheKitAutoConfiguration {
                 ObjectProvider<DoubleDeleteScheduler> doubleDeleteScheduler,
                 ObjectProvider<io.github.biglv666.cachekit.core.StreamsInvalidationConsumer> streamsConsumer,
                 ObjectProvider<io.github.biglv666.cachekit.core.L2CircuitBreaker> circuitBreaker,
-                ObjectProvider<io.github.biglv666.cachekit.core.CacheStatsCollector> stats) {
+                ObjectProvider<io.github.biglv666.cachekit.core.CacheStatsCollector> stats,
+                ObjectProvider<io.github.biglv666.cachekit.generic.GenericCacheRegistry> genericRegistry,
+                ObjectProvider<io.github.biglv666.cachekit.generic.TieredValueCache> valueCache) {
             return new io.github.biglv666.cachekit.actuate.CacheKitEndpoint(
-                    props, registry, cache, l1, doubleDeleteScheduler, streamsConsumer, circuitBreaker, stats);
+                    props, registry, cache, l1, doubleDeleteScheduler, streamsConsumer, circuitBreaker, stats,
+                    genericRegistry, valueCache);
         }
     }
 

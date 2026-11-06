@@ -1,5 +1,47 @@
 # 变更记录
 
+## 0.4.0（2026-11-06）
+
+- **新增**：通用值缓存 `@CacheObject`（值类型元数据）+ `@CacheLoad`（SpEL key 读取/回填）
+  + `CacheStore`（get/put/evict/refresh 生命周期句柄）——可缓存任意 JSON 序列化值
+  （DTO、配置、`List<T>`、`Map<K,V>` 等），复用 L1/L2 三级链、single-flight、null 占位、
+  TTL 抖动、压缩/大值保护、延迟双删与 pub/sub/streams/sharded-pubsub 失效广播。
+  通用缓存不接 binlog（任意值无表/主键映射），失效由业务显式调用或 TTL 兜底；
+  MVP 不提供 `evictAll`/前缀清空。`@CacheLoad.key` 必填，结果 null/空直接抛异常；
+  同一 `@CacheObject.prefix` 只能绑定一个值类型，冲突启动 fail-fast。
+  新增配置 `cache-kit.generic.enabled`（默认 true）与 `max-key-length`（默认 512，
+  超长 key SHA-256 归一化）。文档见 `docs/GENERIC.md`
+- **工程**：`JsonCodec` 增加 `JavaType` 反序列化重载（支持泛型返回值）；
+  `BroadcastApplier` 增加通用缓存消息路由与白名单校验（实体消息路径不变）；
+  `CacheHandleBeanPostProcessor` 按字段类型区分 `EntityCache`/`CacheStore`；
+  关闭态注入空操作 `CacheStore`
+- **修复（代码审查）**：
+  - 泛型返回类型按目标类解析：`T`、`List<T>`、`Map<K,V>`、`T[]` 使用
+    `ResolvableType.forMethodReturnType(method, targetClass)` + `GenericTypeResolver` 类型变量表，
+    命中缓存不再退化为 `LinkedHashMap`；`@CacheLoad.value` 只兜底未解析位置
+    （顶层 `Object`、未绑定类型变量、无界通配符），裸 `Map` / `Map<?, V>` 键按 `String` 处理
+  - 泛型 `CacheStore` 字段按目标类解析（`ResolvableType.forField(field, targetClass)`），
+    支持泛型父类声明的 `CacheStore<List<T>>`
+  - `@CacheLoad` 声明的受检异常原样传播（single-flight 等待者收到同一异常实例），
+    不再包装为 `CacheKitException`，异常结果不写缓存
+  - 接口/抽象类 `@CacheObject` 在启动/首次注册时 fail-fast（带 Jackson `@JsonTypeInfo`
+    的多态类型除外），避免"写入成功、读取永远解码失败"
+  - actuator `/actuator/cachekit` 新增 `genericCaches` 段，`entities` 只保留实体缓存
+    （`generic:` 合成统计键不再混入实体行）
+  - `@CacheLoad` 可声明在接口/泛型父类方法上：切面改为 `PointcutAdvisor` 按目标类
+    （方法 → 具体重写 → 接口 → 父类）回溯注解，启动扫描同步覆盖接口方法
+  - 事务感知失效合并为 `TransactionAwareEviction` 门面，实体注解与 `CacheStore` 共用
+    "活动事务且非只读 → afterCommit，其余立即失效"语义，消除两份实现漂移
+  - `CacheStore.put` 写入不可缓存值（序列化失败 / 超过 `l2.max-value-kb`）时改为失效旧值，
+    不再静默保留旧值直到 TTL；`put(key, null)` 在 `cacheNull=false` 或 `l2.null-ttl` 非正时
+    按失效处理（含延迟双删与 `evictions` 统计）
+  - `l2.null-ttl` 非正（关闭负缓存）时实体缓存与通用缓存均不再写入 L1 null 占位，
+    与配置文档语义一致
+  - `TieredValueCache.put` 移除未使用的 `valueType` 参数，避免误导调用方
+  - `/actuator/cachekit` 的 `singleFlightInflight` 合并实体缓存与通用缓存的回源中键数
+  - `GenericCacheLoadBeanPostProcessor` 改为单例全部实例化后统一扫描注册，
+    BPP 阶段不再触发 registry 创建；启动期 fail-fast 与广播白名单行为不变
+
 ## 0.3.3（2026-10-26）
 
 - **修复**：binlog 表结构缓存进程生命周期内永不过期——运行期 DDL（尤其是 `ADD COLUMN ... FIRST`

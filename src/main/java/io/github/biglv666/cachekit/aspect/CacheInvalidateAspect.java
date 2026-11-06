@@ -34,8 +34,6 @@ public class CacheInvalidateAspect {
 
     private static final Logger log = LoggerFactory.getLogger(CacheInvalidateAspect.class);
 
-    private static final boolean SPRING_TX_PRESENT = detectSpringTx();
-
     private final TieredEntityCache tieredCache;
     private final EntityMetadataRegistry registry;
     private final PrimaryKeyResolver primaryKeyResolver;
@@ -51,15 +49,6 @@ public class CacheInvalidateAspect {
         this.evictAfterCommit = evictAfterCommit;
     }
 
-    private static boolean detectSpringTx() {
-        try {
-            Class.forName("org.springframework.transaction.support.TransactionSynchronizationManager");
-            return true;
-        } catch (ClassNotFoundException | LinkageError e) {
-            return false;
-        }
-    }
-
     /** 失效入口：spring-tx 存在且开启配置时走事务感知路径，否则立即失效。供 MP 自动切面复用 */
     public void evictSmart(EntityMetadata meta, Object id) {
         Runnable action = () -> tieredCache.evict(meta, id);
@@ -73,11 +62,7 @@ public class CacheInvalidateAspect {
     }
 
     private void runTxAware(Runnable action) {
-        if (evictAfterCommit && SPRING_TX_PRESENT) {
-            TransactionAwareEvictor.evict(action);
-        } else {
-            action.run();
-        }
+        TransactionAwareEviction.evictIfConfigured(action, evictAfterCommit);
     }
 
     @AfterReturning(pointcut = "@annotation(cacheInvalidate)")

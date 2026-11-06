@@ -284,7 +284,10 @@ public class TieredEntityCache {
                     // 各自 decode 出新对象，避免 single-flight 等待者共享同一可变实例被并发污染
                     Object payload;
                     if (db == null) {
-                        if (cacheNull) {
+                        // null-ttl 非正表示显式关闭负缓存：两级都不写占位
+                        // （l1TtlFor 对非正基准会回退 l1.ttl，必须在此处拦截）
+                        boolean cachePlaceholder = cacheNull && nullPlaceholderEnabled();
+                        if (cachePlaceholder) {
                             // null 占位：防穿透，两级都用短 TTL
                             Duration nullTtl = props.getL2().getNullTtl();
                             putBoth(key, JsonCodec.NULL_SENTINEL, nullTtl, l1TtlFor(nullTtl));
@@ -294,7 +297,7 @@ public class TieredEntityCache {
                                 ns.nullPlaceholder(meta.prefix());
                             }
                         }
-                        payload = cacheNull ? JsonCodec.NULL_SENTINEL : null;
+                        payload = cachePlaceholder ? JsonCodec.NULL_SENTINEL : null;
                     } else {
                         // 序列化失败不丢业务数据：返回结果只是不缓存（实体含不支持的类型时）
                         String json = null;
@@ -542,7 +545,8 @@ public class TieredEntityCache {
                     } else {
                         // 误判时缺失 ID 不写 null 占位：请求值尚未被证明是主键，
                         // 占位键不会被对应行后续 insert 的失效命中（strict 语义不变）
-                        if (cacheNull && !misfired) {
+                        boolean cachePlaceholder = cacheNull && !misfired && nullPlaceholderEnabled();
+                        if (cachePlaceholder) {
                             Duration nullTtl = props.getL2().getNullTtl();
                             putBoth(keys[ownedIdx.get(i)], JsonCodec.NULL_SENTINEL, nullTtl, l1TtlFor(nullTtl));
                             metrics.nullPlaceholder();
@@ -551,7 +555,7 @@ public class TieredEntityCache {
                                 ns.nullPlaceholder(meta.prefix());
                             }
                         }
-                        payload = cacheNull && !misfired ? JsonCodec.NULL_SENTINEL : null;
+                        payload = cachePlaceholder ? JsonCodec.NULL_SENTINEL : null;
                     }
                     slots[ownedIdx.get(i)].complete(payload);
                 }
@@ -910,6 +914,12 @@ public class TieredEntityCache {
      * L2，若覆盖值小于 l1.ttl 会出现"L2 已过期、L1 仍供旧值"的倒装——L1 必须始终是更短的脏读上界。
      * 任一侧为非正值时保持 l1 原值（非正 TTL 的统一语义是"该级跳过写入/禁用"，见 CacheKitProperties）。
      */
+    /** null 占位是否启用：null-ttl 非正表示关闭负缓存（与配置文档一致） */
+    private boolean nullPlaceholderEnabled() {
+        Duration nullTtl = props.getL2().getNullTtl();
+        return nullTtl != null && !nullTtl.isZero() && !nullTtl.isNegative();
+    }
+
     private Duration l1TtlFor(Duration l2Base) {
         Duration l1 = props.getL1().getTtl();
         if (l1 == null || l1.isZero() || l1.isNegative()

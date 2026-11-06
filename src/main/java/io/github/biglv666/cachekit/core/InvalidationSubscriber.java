@@ -24,6 +24,11 @@ public class InvalidationSubscriber implements MessageListener {
         this.applier = new BroadcastApplier(l1, registry, namespace);
     }
 
+    /** 复用调用方已配置的 applier（含通用缓存白名单路由） */
+    public InvalidationSubscriber(BroadcastApplier applier) {
+        this.applier = applier;
+    }
+
     /** 挂载指标监听器 */
     public void setMetricsListener(CacheMetricsListener metrics) {
         applier.setMetricsListener(metrics);

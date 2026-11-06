@@ -50,6 +50,13 @@
 
 ## Known limitations & notes
 
+- **Generic value cache has no binlog integration** (0.4.0+): arbitrary values cached by
+  `@CacheObject`/`@CacheLoad` have no table/primary-key mapping, so writes cannot invalidate them
+  automatically. Call `CacheStore.evict/refresh` explicitly or rely on TTL. The MVP also has no
+  `evictAll`/prefix wipe (avoids production L2 `SCAN` risks)
+- **Generic cache keys must be explicit**: `@CacheLoad.key` is a required SpEL; a null/blank
+  result throws instead of guessing. One `@CacheObject.prefix` can only bind one value type
+  (startup fail-fast). Self-invocation bypasses the aspect
 - **binlog × transaction timing**: MySQL writes binlog events at **COMMIT time** (they only sit in
   the transaction binlog cache before that), so listeners naturally see post-commit data — there is
   no "invalidate before commit" race; residual read-back-fill races are covered by double-delete +

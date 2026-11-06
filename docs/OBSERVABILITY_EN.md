@@ -53,9 +53,13 @@ automatically (exposure is governed by the host's
 - **streams** (streams mode): consumer group name, whether the group is ready (`groupReady`),
   self-healing recreation count (`groupRecreated`), last measured lag in seconds
   (−1 = not yet measured);
-- **entities**: per-prefix registered metadata (TTL, entity type) and cumulative stats —
-  L1/L2 hits and hit rates, DB loads, null placeholders, invalidations (hit rate = hit/(hit+miss),
-  −1 = no requests yet).
+- **entities**: **entity caches only**, per-prefix registered metadata (TTL, entity type) and
+  cumulative stats — L1/L2 hits and hit rates, DB loads, null placeholders, invalidations
+  (hit rate = hit/(hit+miss), −1 = no requests yet);
+- **genericCaches**: generic value caches, merged by the original `@CacheObject.prefix`, with the
+  registered metadata (`prefix`, `valueType`, `ttl`) and the same set of cumulative stats. The
+  synthetic `generic:` stats keys appear only here and never leak into entities; an empty array is
+  returned when the generic cache is not wired.
 
 Security boundary: outputs prefixes, counters and states only — **no cached keys or values**; no
 binlog credentials or other sensitive configuration.

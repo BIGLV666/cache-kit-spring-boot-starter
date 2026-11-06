@@ -17,6 +17,9 @@
 - 多实例一致性：写后删缓存 + 失效广播（pub/sub 或 Streams 消费组）+ 延迟双删
 - binlog 直连失效：DBA 改库、其他服务写入也能秒级失效，无需 Canal；运行期 DDL 自动感知表结构变化（[文档](docs/BINLOG.md)）
 - `@CacheWarmup` 启动预热、`EntityCache` 手动句柄、`L1Channel` 可插拔 SPI
+- 通用值缓存（0.4.0+）：`@CacheObject` + `@CacheLoad` + `CacheStore`，缓存任意可 JSON 序列化值
+  （DTO/配置/`List<T>`/`Map`），复用三级链与失效广播；失效时机由业务 `put/evict/refresh` 控制
+  （[文档](docs/GENERIC.md)）
 - L1 预刷新（0.3.3+，可选）：剩余 TTL 不足即后台刷新，热点键零过期回源尖刺，一致性承诺不变
 - L2 值策略（0.3.3+）：单值大小上限防大字段撑爆 Redis；可选 gzip 压缩省内存与网络
 - 可观测性：Micrometer 计数器/命中率 Gauge/传播延迟 Timer + Grafana 面板 + `/actuator/cachekit` 运维端点（实体级命中率、双删积压、消费组滞后、熔断状态；[文档](docs/OBSERVABILITY.md)）
@@ -30,7 +33,7 @@
 <dependency>
     <groupId>io.github.biglv666</groupId>
     <artifactId>cache-kit-spring-boot-starter</artifactId>
-    <version>0.3.3</version>
+    <version>0.4.0</version>
 </dependency>
 ```
 
@@ -94,6 +97,23 @@ private EntityCache<User> userCache;   // get / getBatch / evict / evictBatch
 void loadHotUsers() { userMapper.selectBatchIds(List.of(1L, 2L, 3L)); }
 ```
 
+### 通用值缓存（任意对象）
+
+```java
+@CacheObject(prefix = "app-config", ttl = 300)
+public class AppConfig { /* 任意可 JSON 序列化的 DTO */ }
+
+@CacheLoad(key = "#tenant + ':' + #name")          // 未命中才执行方法体并回填
+public AppConfig load(String tenant, String name) { return remoteConfig.get(tenant, name); }
+
+@CacheHandle(AppConfig.class)
+private CacheStore<AppConfig> configStore;          // 业务自控生命周期
+// configStore.get / put / evict / refresh
+```
+
+与实体缓存共用 L1/L2、single-flight、延迟双删与 pub/sub/streams 广播；不接 binlog，
+失效由业务显式调用或 TTL 兜底。详见 [docs/GENERIC.md](docs/GENERIC.md)。
+
 ### 最小配置
 
 ```yaml
@@ -124,6 +144,7 @@ cache-kit:
 | [docs/BINLOG.md](docs/BINLOG.md) | binlog 直连失效：配置、断线重连语义、排查 |
 | [docs/CONSISTENCY.md](docs/CONSISTENCY.md) | 一致性机制、广播通道选择（pubsub/streams）、对比 benchmark、生产实测 |
 | [docs/CONFIG.md](docs/CONFIG.md) | 配置全参考 |
+| [docs/GENERIC.md](docs/GENERIC.md) | 通用值缓存：`@CacheObject`/`@CacheLoad`/`CacheStore`、key/广播/生命周期边界 |
 | [docs/OBSERVABILITY.md](docs/OBSERVABILITY.md) | Micrometer 指标、/actuator/cachekit 端点、告警建议、Grafana 面板 |
 | [docs/RESILIENCE.md](docs/RESILIENCE.md) | 稳健性设计：降级、重试、积压保护、安全边界 |
 | [docs/LIMITATIONS.md](docs/LIMITATIONS.md) | MVP 边界、已知限制、FAQ |

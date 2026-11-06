@@ -28,6 +28,10 @@ typically sub-second (within the double-delete window), worst case bounded by th
 - Direct binlog invalidation: DBA updates and other services' writes invalidate within seconds,
   no Canal; runtime DDL changes are detected automatically ([docs/BINLOG_EN.md](docs/BINLOG_EN.md))
 - `@CacheWarmup` startup warmup, `EntityCache` manual handle, pluggable `L1Channel` SPI
+- Generic value cache (0.4.0+): `@CacheObject` + `@CacheLoad` + `CacheStore` for arbitrary
+  JSON-serializable values (DTOs, config, `List<T>`, `Map`), reusing the tiered chain and
+  invalidation broadcast; lifecycle is controlled by `put/evict/refresh`
+  ([docs](docs/GENERIC_EN.md))
 - Observability: Micrometer counters / hit-rate gauges / propagation timer + Grafana dashboard
   ([docs/OBSERVABILITY_EN.md](docs/OBSERVABILITY_EN.md))
 - Strong-consistency escape hatch: `CacheKit.withDb(...)` scope bypass
@@ -40,7 +44,7 @@ typically sub-second (within the double-delete window), worst case bounded by th
 <dependency>
     <groupId>io.github.biglv666</groupId>
     <artifactId>cache-kit-spring-boot-starter</artifactId>
-    <version>0.3.3</version>
+    <version>0.4.0</version>
 </dependency>
 ```
 
@@ -106,6 +110,24 @@ private EntityCache<User> userCache;   // get / getBatch / evict / evictBatch
 void loadHotUsers() { userMapper.selectBatchIds(List.of(1L, 2L, 3L)); }
 ```
 
+### Generic value cache (arbitrary objects)
+
+```java
+@CacheObject(prefix = "app-config", ttl = 300)
+public class AppConfig { /* any JSON-serializable DTO */ }
+
+@CacheLoad(key = "#tenant + ':' + #name")          // runs only on a miss, then back-fills
+public AppConfig load(String tenant, String name) { return remoteConfig.get(tenant, name); }
+
+@CacheHandle(AppConfig.class)
+private CacheStore<AppConfig> configStore;          // business-controlled lifecycle
+// configStore.get / put / evict / refresh
+```
+
+Shares L1/L2, single-flight, delayed double delete and pub/sub/streams broadcast with the entity
+cache; no binlog integration — invalidate explicitly or rely on TTL.
+See [docs/GENERIC_EN.md](docs/GENERIC_EN.md).
+
 ### Minimal configuration
 
 ```yaml
@@ -133,6 +155,7 @@ All topic docs have English versions under [`docs/`](docs/) (CHANGELOG remains C
 | [docs/BINLOG_EN.md](docs/BINLOG_EN.md) | direct binlog invalidation: config, file/position vs GTID, reconnect semantics, troubleshooting |
 | [docs/CONSISTENCY_EN.md](docs/CONSISTENCY_EN.md) | consistency mechanism, broadcast channel choice, stress comparison, production measurements |
 | [docs/CONFIG_EN.md](docs/CONFIG_EN.md) | full configuration reference |
+| [docs/GENERIC_EN.md](docs/GENERIC_EN.md) | generic value cache: `@CacheObject`/`@CacheLoad`/`CacheStore`, keys, broadcast, lifecycle |
 | [docs/OBSERVABILITY_EN.md](docs/OBSERVABILITY_EN.md) | Micrometer metrics, `/actuator/cachekit`, alerting, Grafana dashboard |
 | [docs/RESILIENCE_EN.md](docs/RESILIENCE_EN.md) | resilience design: degradation, retries, value caps, security |
 | [docs/LIMITATIONS_EN.md](docs/LIMITATIONS_EN.md) | MVP boundaries, known limitations, FAQ |

@@ -113,6 +113,23 @@ class CacheInvalidateTxTest {
     }
 
     @Test
+    void readOnlyTransactionShouldEvictImmediately() {
+        TransactionSynchronizationManager.setActualTransactionActive(true);
+        TransactionSynchronizationManager.setCurrentTransactionReadOnly(true);
+        TransactionSynchronizationManager.initSynchronization();
+        try {
+            aspect(true).evictSmart(meta, 1L);
+            assertThat(cache.peek(meta, 1L).state())
+                    .as("只读事务立即失效，不注册 afterCommit")
+                    .isEqualTo(TieredEntityCache.CachePeek.State.MISS);
+        } finally {
+            TransactionSynchronizationManager.setCurrentTransactionReadOnly(false);
+            TransactionSynchronizationManager.clearSynchronization();
+            TransactionSynchronizationManager.setActualTransactionActive(false);
+        }
+    }
+
+    @Test
     void handleEvictShouldAlsoBeTransactionAware() {
         // 手动句柄（@CacheHandle 注入的 EntityCache）与注解路径共用事务感知钩子
         TransactionSynchronizationManager.setActualTransactionActive(true);

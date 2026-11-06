@@ -48,9 +48,12 @@
 - **doubleDelete**：当前积压任务数 / 上限（1 万）；
 - **streams**（streams 模式）：消费组名、组是否就绪（`groupReady`）、自愈重建次数
   （`groupRecreated`）、最近量测的滞后秒数（-1 = 尚未量测）；
-- **entities**：按实体前缀合并的注册元数据（TTL、实体类型）与累计统计——
+- **entities**：**仅实体缓存**，按实体前缀合并的注册元数据（TTL、实体类型）与累计统计——
   L1/L2 命中数与命中率、DB 回源、null 占位、失效计数（命中率 = hit/(hit+miss)，
-  -1 表示无请求）。
+  -1 表示无请求）；
+- **genericCaches**：通用值缓存，按原始 `@CacheObject.prefix` 合并注册元数据
+  （`prefix`、`valueType`、`ttl`）与同一组累计统计。统计内部的 `generic:` 合成键
+  只在这里出现，不会混入 entities；未装配通用缓存时输出空数组。
 
 安全边界：只输出前缀、计数与状态，**不含任何缓存键值**；不含 binlog 凭据等敏感配置。
 

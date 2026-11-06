@@ -49,6 +49,9 @@ cache-kit:
                            # 非 Lettuce 或订阅失败时自动回退 pubsub 并告警）
     topic: cache-kit:invalidate  # streams 模式下为 Stream 键
     streams-maxlen: 10000  # streams 模式 Stream 近似裁剪上界（XADD MAXLEN ~）
+  generic:                 # 通用值缓存（0.4.0+，@CacheObject/@CacheLoad/CacheStore）
+    enabled: true          # false：@CacheLoad 直接执行方法体；CacheStore 注入空操作句柄
+    max-key-length: 512    # 用户 key 最大长度，超过后 SHA-256 归一化，防超长 key 撑大 Redis/日志
   mp:                      # MyBatis-Plus 适配
     auto-cache-base-methods: true  # 自动接入总开关：BaseMapper 六方法 + IService 批量写
                                    # （saveBatch/updateBatchById/saveOrUpdateBatch）；条件写不在范围

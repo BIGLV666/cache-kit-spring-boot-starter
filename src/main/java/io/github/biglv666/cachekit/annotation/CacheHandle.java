@@ -1,5 +1,6 @@
 package io.github.biglv666.cachekit.annotation;
 
+import io.github.biglv666.cachekit.core.CacheStore;
 import io.github.biglv666.cachekit.core.EntityCache;
 
 import java.lang.annotation.Documented;
@@ -9,14 +10,19 @@ import java.lang.annotation.RetentionPolicy;
 import java.lang.annotation.Target;
 
 /**
- * 字段注入注解：向字段注入 {@link EntityCache} 句柄，
- * 用于无法加方法注解的场景（三方 mapper、动态拼接查询）。
+ * 字段注入注解：按字段类型注入缓存句柄。
+ *
+ * <ul>
+ *   <li>{@link EntityCache}：实体缓存句柄，{@link #value()} 为实体类型；</li>
+ *   <li>{@link CacheStore}：通用缓存句柄，{@link #value()} 为标注 {@code @CacheObject} 的值类型。</li>
+ * </ul>
  *
  * <pre>{@code
  * @CacheHandle(User.class)
  * private EntityCache<User> userCache;
  *
- * User u = userCache.get(id, () -> mapper.selectByUserId(id));
+ * @CacheHandle(AppConfig.class)
+ * private CacheStore<AppConfig> configStore;
  * }</pre>
  */
 @Documented
@@ -24,6 +30,6 @@ import java.lang.annotation.Target;
 @Retention(RetentionPolicy.RUNTIME)
 public @interface CacheHandle {
 
-    /** 缓存对应的实体类型 */
+    /** 实体类型（EntityCache）或通用缓存值类型（CacheStore） */
     Class<?> value();
 }

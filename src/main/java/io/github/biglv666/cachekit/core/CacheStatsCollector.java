@@ -17,6 +17,12 @@ import java.util.concurrent.atomic.LongAdder;
  */
 public class CacheStatsCollector {
 
+    /**
+     * 通用值缓存的统计键前缀：通用缓存与实体缓存共用本收集器，用该前缀把
+     * {@code prefix} 维度隔离开；端点分别输出 {@code entities} / {@code genericCaches}。
+     */
+    public static final String GENERIC_STATS_PREFIX = "generic:";
+
     /** 单个实体的累计计数（LongAdder：高并发写、低频读快照） */
     public static final class EntityStats {
         private final LongAdder l1Hit = new LongAdder();
