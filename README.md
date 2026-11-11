@@ -6,9 +6,9 @@
 
 实体元数据驱动的三级缓存组件：**Caffeine（L1）→ Redis（L2）→ DB（loader）** read-through。
 对 MyBatis-Plus 用户**零注解接入**；binlog 直连失效补齐"绕过应用的写"盲区；
-一致性语义为**最终一致**——常态秒级（双删窗口内），最坏受 L2 TTL 上界约束（[机制与实测](docs/CONSISTENCY.md)）。
+一致性语义为**最终一致**——常态秒级（双删窗口内），最坏受 L2 TTL 上界约束（[机制说明](docs/CONSISTENCY.md)）。
 
-## 特性
+## 核心特性
 
 - 三级 read-through：L1 → L2 → 方法体（查 DB），命中逐级回填
 - 缓存键由实体元数据自动推导（`表名:主键`），无需手写 SpEL 键；复合主键（多个 `@CacheId`）按声明序 join（0.3.3+）
@@ -17,13 +17,9 @@
 - 多实例一致性：写后删缓存 + 失效广播（pub/sub 或 Streams 消费组）+ 延迟双删
 - binlog 直连失效：DBA 改库、其他服务写入也能秒级失效，无需 Canal；运行期 DDL 自动感知表结构变化（[文档](docs/BINLOG.md)）
 - `@CacheWarmup` 启动预热、`EntityCache` 手动句柄、`L1Channel` 可插拔 SPI
-- 通用值缓存（0.4.0+）：`@CacheObject` + `@CacheLoad` + `CacheStore`，缓存任意可 JSON 序列化值
-  （DTO/配置/`List<T>`/`Map`），复用三级链与失效广播；失效时机由业务 `put/evict/refresh` 控制
-  （[文档](docs/GENERIC.md)）
-- L1 预刷新（0.3.3+，可选）：剩余 TTL 不足即后台刷新，热点键零过期回源尖刺，一致性承诺不变
-- L2 值策略（0.3.3+）：单值大小上限防大字段撑爆 Redis；可选 gzip 压缩省内存与网络
-- 可观测性：Micrometer 计数器/命中率 Gauge/传播延迟 Timer + Grafana 面板 + `/actuator/cachekit` 运维端点（实体级命中率、双删积压、消费组滞后、熔断状态；[文档](docs/OBSERVABILITY.md)）
-- 强一致读出口：`CacheKit.withDb(...)` 作用域旁路
+- 通用值缓存（0.4.0+）：`@CacheObject` + `@CacheLoad` + `CacheStore`，缓存任意可 JSON 序列化值（DTO/配置/`List<T>`/`Map`），复用三级链与失效广播；失效时机由业务 `put/evict/refresh` 控制（[文档](docs/GENERIC.md)）
+- L1 预刷新（0.3.3+，可选）：剩余 TTL 不足即后台刷新，热点键零过期回源尖刺；L2 值策略（0.3.3+）：单值大小上限防大字段撑爆 Redis，可选 gzip 压缩
+- 可观测性：Micrometer 指标 + Grafana 面板 + `/actuator/cachekit` 端点；强一致读出口 `CacheKit.withDb(...)`（[文档](docs/OBSERVABILITY.md)）
 
 ## 快速开始
 
@@ -38,12 +34,8 @@
 ```
 
 要求 JDK 17+、Spring Boot 3.5.x（Boot 4 前向兼容，见 [docs/BOOT4-NATIVE.md](docs/BOOT4-NATIVE.md)）。
-L2（Redis）与 MyBatis-Plus 适配按类路径自动启用。
-
-> 最小可跑示例：[cache-kit-sample](https://github.com/BIGLV666/cache-kit-sample)（docker compose 一键起
-> Redis + 带 binlog 的 MySQL，五条 curl 验证全部效果）。设计演进与压测对比见
-> 深度文章《三级缓存的两个失效盲区，我用 binlog 和消费组广播补上了》（已发布：[掘金](https://juejin.cn/post/7690830871914332186) / [CSDN](https://blog.csdn.net/2502_94557984/article/details/166848452)）；
-> [Caffeine 源码详解](https://juejin.cn/post/7691207444282179618)（[CSDN](https://blog.csdn.net/2502_94557984/article/details/166940522)）。
+L2（Redis）与 MyBatis-Plus 适配按类路径自动启用。最小可跑示例见
+[cache-kit-sample](https://github.com/BIGLV666/cache-kit-sample)（docker compose 一键起 Redis + 带 binlog 的 MySQL）。
 
 ### MyBatis-Plus 项目（零注解）
 
@@ -63,9 +55,8 @@ userMapper.updateById(user);                     // 自动失效 + 广播 + 延�
 写覆盖范围（自动失效，无需注解）：
 
 - `updateById` / `deleteById` / `deleteByIds` / `insert`：经 mapper 代理，切面直接拦截
-- **`IService.saveBatch` / `updateBatchById` / `saveOrUpdateBatch`（0.3.0+）**：SqlSession 批量通道绕过
-  mapper 代理，由独立 service 切面覆盖
-- **条件写（`update(Wrapper)` 等）无法精确失效**——开启 binlog 可覆盖，否则靠 TTL 兜底
+- `IService.saveBatch` / `updateBatchById` / `saveOrUpdateBatch`（0.3.0+）：独立 service 切面覆盖
+- 条件写（`update(Wrapper)` 等）无法精确失效——开启 binlog 可覆盖，否则靠 TTL 兜底
 
 ### 非 MP 项目（实体注解）
 
@@ -111,8 +102,7 @@ private CacheStore<AppConfig> configStore;          // 业务自控生命周期
 // configStore.get / put / evict / refresh
 ```
 
-与实体缓存共用 L1/L2、single-flight、延迟双删与 pub/sub/streams 广播；不接 binlog，
-失效由业务显式调用或 TTL 兜底。详见 [docs/GENERIC.md](docs/GENERIC.md)。
+不接 binlog，失效由业务显式调用或 TTL 兜底，详见 [docs/GENERIC.md](docs/GENERIC.md)。
 
 ### 最小配置
 
@@ -123,32 +113,28 @@ cache-kit:
   l2:
     ttl: 10m
   # broadcast:
-  #   mode: streams     # 多实例且对"重启窗口丢失效"敏感时启用（默认 pubsub）；
-  #                     # Redis Cluster 也可用 sharded-pubsub（分片广播，仅 Lettuce）
-  # l2:
-  #   circuit-breaker:
-  #     enabled: true   # L2 熔断器（默认开）：Redis 故障期间短路降级，免逐次阻塞到超时
+  #   mode: streams     # 多实例且对"重启窗口丢失效"敏感时启用（默认 pubsub）
   # binlog:
-  #   enabled: true     # 覆盖"绕过应用的写"
-  #   schema-refresh-interval: 10m  # 运行期 DDL 自动感知（列数变化即时重载）
-  # l1:
-  #   refresh-ahead: 5s # L1 预刷新（默认关）：剩余 TTL 不足 5s 即后台刷新，热点键无过期回源尖刺
+  #   enabled: true     # 覆盖"绕过应用的写"；schema-refresh-interval 默认 10m
 ```
 
 完整参数见 [docs/CONFIG.md](docs/CONFIG.md)。
-
-## 文档
+## 文档导航
 
 | 文档 | 内容 |
 |---|---|
 | [docs/BINLOG.md](docs/BINLOG.md) | binlog 直连失效：配置、断线重连语义、排查 |
-| [docs/CONSISTENCY.md](docs/CONSISTENCY.md) | 一致性机制、广播通道选择（pubsub/streams）、对比 benchmark、生产实测 |
+| [docs/CONSISTENCY.md](docs/CONSISTENCY.md) | 一致性机制、脏读窗口、广播通道选择（pubsub/streams） |
 | [docs/CONFIG.md](docs/CONFIG.md) | 配置全参考 |
 | [docs/GENERIC.md](docs/GENERIC.md) | 通用值缓存：`@CacheObject`/`@CacheLoad`/`CacheStore`、key/广播/生命周期边界 |
-| [docs/OBSERVABILITY.md](docs/OBSERVABILITY.md) | Micrometer 指标、/actuator/cachekit 端点、告警建议、Grafana 面板 |
+| [docs/OBSERVABILITY.md](docs/OBSERVABILITY.md) | Micrometer 指标、`/actuator/cachekit` 端点、告警建议、Grafana 面板 |
 | [docs/RESILIENCE.md](docs/RESILIENCE.md) | 稳健性设计：降级、重试、积压保护、安全边界 |
 | [docs/LIMITATIONS.md](docs/LIMITATIONS.md) | MVP 边界、已知限制、FAQ |
 | [docs/BOOT4-NATIVE.md](docs/BOOT4-NATIVE.md) | Spring Boot 4 兼容、GraalVM native-image |
 | [docs/CHANGELOG.md](docs/CHANGELOG.md) | 版本变更记录 |
 
-English: see [README_EN.md](README_EN.md)（topic docs 均有英文版；CHANGELOG 仅中文）。
+English docs: [README_EN.md](README_EN.md)（topic docs 均有英文版；CHANGELOG 仅中文）。
+
+## License
+
+Apache License 2.0

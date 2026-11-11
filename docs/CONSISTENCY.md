@@ -1,4 +1,4 @@
-# 一致性机制与性能实测
+# 一致性机制
 
 ## 强一致读（豁免）
 
@@ -53,119 +53,15 @@
   元数据极小但建议纳入观测（`XINFO GROUPS <topic>`，或对 Redis 侧内存设基线告警）。
   发布频率极高（分钟级滚动）且实例数大时，优先评估 pubsub + 更短的 L1 TTL 组合。
 
-## 压测对比：cache-kit vs Spring Cache vs JetCache（0.3.1+）
+## 性能量级（摘要）
 
-`CacheStressComparisonIntegrationTest`（Testcontainers redis:7，16 逻辑核机器）。
-对比对象均取各自生产典型配置：Spring Cache = RedisCacheManager + Lettuce 连接池（8）+ JSON 序列化；
-JetCache = RedisLettuceCache（多级档为 Caffeine+Redis）。数值随环境波动，**量级与相对关系**才是重点。
+- 本地 L1 命中路径为亚微秒~微秒级；有本地层的实现吞吐上限远高于纯远程（Redis 往返 + 连接池）实现。
+- 工作集超出 L1 后，吞吐回落到远程量级；有效容量由 L1 容量、TTL 与访问倾斜决定的命中率支配。
+- single-flight 使每键回源收敛为 1 次；无单飞语义的实现击穿时回源次数约等于并发数。
+- 跨实例失效广播延迟为几十毫秒级；pubsub 可能丢消息、streams 有消费组滞后与 MAXLEN 边界，均由 L1 TTL 兜底。
+- 完整的压测方法、原始数据、逐项归因与 PaperWise 生产实测已归档到维护文档，不随组件仓库发布。
 
-术语：**op = 一次读缓存调用**（cache-kit `load` / Spring Cache `get` / JetCache `get`），
-ops/s 为每秒完成的读调用次数（多线程聚合值）。
+延伸阅读（设计演进与性能对比）：
 
-### 场景 1：并发读吞吐上限（线程数从 cores/2 扫到 4×cores，每档 0.3s 预热 + 2s 计时，取最优档）
-
-**工作负载（读数字前必看）**：value 为 2 字段实体（JSON ~30B）；1000 键均匀轮转、无热点倾斜，
-全部容于 L1（10k 容量）。因此下表是**纯命中的物理上限**——生产能摸到多少由命中率决定
-（工作集超出 L1 时吞吐断崖，见场景 1b）。
-
-| 实现 | 吞吐上限 | 最优并发 | p99 @最优 |
-|---|---|---|---|
-| cache-kit 三级（L1 命中） | **~1450 万 ops/s** | 32~64 线程平台期 | ~1µs |
-| JetCache 多级（Caffeine+Redis） | ~690 万 ops/s | 32 线程 | ~190µs |
-| Spring Cache（仅 Redis，池 8） | ~2.8 万 ops/s | 64 线程 | ~4.8ms |
-| JetCache 仅远程 | ~2.8 万 ops/s | 64 线程 | ~5.0ms |
-| cache-kit 仅 L2（单连接） | ~2.7 万 ops/s | 64 线程 | ~4.9ms |
-| 裸 Redis GET（池 8） | ~2.8 万 ops/s | 64 线程 | ~4.8ms |
-
-有本地层的实现上限高出 **~550 倍**；仅远程各实现同为"Redis 往返 + 连接池"瓶颈，彼此相近——
-三级架构的价值在于**本地层挡掉绝大部分往返**，而不是远程读更快。
-
-### 场景 1b：工作集超出 L1（L1 容量压到 100 / 1000 键，32 线程）——命中率支配真实吞吐
-
-| 访问分布 | L1 命中率 | 聚合吞吐 |
-|---|---|---|
-| 均匀分布 | 6.8% | ~2.7 万 ops/s（≈ 远程上限） |
-| Zipf 热点 | 30.2% | ~3.6 万 ops/s |
-
-工作集一旦超出 L1，吞吐立刻从百万级跌回远程量级——**有效吞吐 = 命中率 × 命中成本 + 未命中率 × 远程成本**，
-命中率（由容量、TTL、访问倾斜决定）才是生产容量的第一变量。上表的 1450 万只在"热数据全部装得下 L1"时成立。
-
-**归因说明（别过度解读场景 1）**：
-- **低并发的真实成本**：cache-kit 每次命中要 Jackson 反序列化出**独立实例**（防共享可变对象被业务污染），
-  单次命中 ~430ns（mean），JetCache 本地 get ~150ns——**低并发低 QPS 下 cache-kit 更慢**，
-  文档不回避这点。但两者都远低于 1µs，对业务不可感知；该成本只在命中 QPS 逼近百万级才需要掂量，
-  换来的是"返回对象可安全改写"的语义。
-- 单线程逐段实测（`CacheHitPathAttributionTest`，中位数）：纯 Caffeine get ~100ns、
-  Jackson 反序列化 ~200ns、cache-kit load 命中全路径 ~400ns（mean 494ns）、JetCache 本地 get ~100ns（mean 166ns）。
-- 多线程聚合吞吐 cache-kit 反超是并发扩展性差异：JetCache 多级 8 线程即到顶（吞吐不动、
-  p99 从 35µs 恶化到 427µs），cache-kit 8→64 线程持续扩展。本地命中层两者同属亚微秒~微秒档，
-  **该行差异不构成选型依据**。
-- **64 线程的轻微回落是轮间噪声，不是硬上限**：32 与 64 档差异 ~3%（1486 万 vs 1443 万，
-  两轮互有胜负），p99 均保持 ~1µs。归因：cache-kit 每命中分配 ~880B（JetCache ~306B），
-  1450 万 ops/s ≈ 12.7 GB/s 分配率——GC young 频繁但停顿短（p99 未受影响），
-  叠加调度与内存带宽收益递减。高并发场景可用，32 线程并非硬顶。
-
-**尾延迟劣化的机制（为什么 JetCache 多级 p99 随并发恶化）**：
-1. 普遍规律：并发升高使资源利用率逼近饱和，等待时间非线性放大——所有实现都有，只是幅度不同。
-2. JetCache 本地缓存为支持 `expireAfterAccess` 语义，用了 Caffeine 自定义 `Expiry`——Caffeine
-   **每次读都回调 `expireAfterRead`**（内部 `System.currentTimeMillis()` + 随时间连续变化的剩余时间重算），
-   返回值漂移导致 Caffeine 对热点条目频繁重排定时器（共享写）。隔离实验
-   （`CacheExpiryTailTest`，16 线程裸 Caffeine 对比）：变量 Expiry 比固定 expireAfterWrite
-   吞吐低 ~25%，max 尾部出现 300ms 级尖刺。
-3. 叠加多级包装的每次读分配（CacheGetResult/两级迭代/holder 检查），高并发下争用放大。
-4. cache-kit 反例佐证主导因素：同样 Caffeine、同样 1000 键、同样线程数，用固定
-   `expireAfterWrite` 的纯读路径 p99 稳定 ~1µs——它甚至分配更多（每次命中 Jackson 反序列化），
-   说明分配/GC 不是尾延迟的主导，**每读回调 + 条目重排的共享写才是**。
-
-### 场景 2：缓存击穿（200 并发打同一冷键，模拟 50ms DB）
-
-| 实现 | DB 回源次数 | 总耗时 |
-|---|---|---|
-| cache-kit（single-flight 内置） | **1** | ~70ms |
-| Spring Cache（默认，无互斥） | 200 | ~175ms |
-| JetCache（默认） | 200 | ~143ms |
-| JetCache（penetrationProtect=true） | **1** | ~66ms |
-
-cache-kit 的 single-flight 与 null 占位是**默认开启**的；JetCache 需显式开启 penetrationProtect，
-Spring Cache 需自行加锁或换 locking writer，否则击穿时回源次数 = 并发数。
-
-### 场景 2b：冷启动回源放大（64 并发 × 100 冷键，每线程顺序请求全部键，模拟 20ms DB）
-
-| 实现 | DB 总回源次数 | 相对倍数 | 总耗时 |
-|---|---|---|---|
-| cache-kit | **100**（每键 1 次） | 1× | ~3.1s |
-| JetCache（penetrationProtect=true） | **100** | 1× | ~2.8s |
-| Spring Cache（默认） | 6,287 | ~63× | ~3.0s |
-| JetCache（默认） | 6,400 | ~64× | ~3.0s |
-
-应用重启/缓存清空后首批流量是回源峰值：无单飞语义的实现，DB 承压 ≈ 并发 × 键数；
-single-flight 把每键收敛为 1 次回源，DB 承压 ≈ 键数。
-
-### 场景 3：单键失效传播（A 实例 evict → B 实例 L1 清除，100 轮）
-
-| 通道 | p50 | p99 | max |
-|---|---|---|---|
-| cache-kit pubsub | ~8.2ms | ~45ms | ~45ms |
-| cache-kit streams | ~8.8ms | ~22ms | ~22ms |
-
-跨实例失效在**几十毫秒级**完成；JetCache 的跨实例本地缓存失效依赖其 CacheManager 广播装配
-（本压测未含），Spring Cache 无本地层、天然无此问题但每次读都付 Redis 往返（见场景 1）。
-
-复现：`mvn test -Dtest=CacheStressComparisonIntegrationTest`（另有单线程微基准
-`CacheBenchmarkIntegrationTest` 可作量级参考）。
-
-## 生产实测（PaperWise 宿主项目）
-
-单机 4~10 实例 + Docker Redis/MySQL，Java 17：
-
-| 场景 | 实测 |
-|---|---|
-| 缓存命中读 | 微秒级；20,249 个 HTTP 请求期间 MySQL InnoDB 行读取零增长 |
-| 应用内写失效 | 每写增加约 1~2ms（DEL L2 + 广播 + 双删调度）；4.6 万次广播零丢失 |
-| 广播最终一致性 | 10 实例、716 写/s 并发、4.6 万次广播：全实例最终版本校验 100% 通过 |
-| 脏读窗口（应用内写） | 最大 119ms~505ms（含单 JVM 调度噪声），远小于 L1 TTL 30s 设计上界 |
-| 脏读窗口（binlog 直写） | p99 14.2ms，300 次直写零漏失效 |
-| 外部 HTTP 全链路 | 单实例饱和 ~1700 req/s；延迟基线由鉴权 Redis 往返主导，缓存命中本身微秒级 |
-| 回源放大 | 热键上每次写约 3 次 DB 回源（广播删 + 双删删 + 在途回读），写极热键需评估 |
-| 跨实例击穿放大（0.3.0 量化） | single-flight 仅单 JVM 生效：N 实例同时击穿同一未热键 = N 次 DB 回源（每实例 1 次）；
-  冷启动场景 N×键数 即回源峰值，DB 按 `N × 每秒新增键数` 估算容量；若需全局互斥可外挂分布式锁，组件刻意未内置（锁的开销与死锁面 > 冷启动回源放大） |
+- 《三级缓存的两个失效盲区，我用 binlog 和消费组广播补上了》：[掘金](https://juejin.cn/post/7690830871914332186) / [CSDN](https://blog.csdn.net/2502_94557984/article/details/166848452)
+- 《Caffeine 源码详解》：[掘金](https://juejin.cn/post/7691207444282179618) / [CSDN](https://blog.csdn.net/2502_94557984/article/details/166940522)
